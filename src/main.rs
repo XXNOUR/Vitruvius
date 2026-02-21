@@ -1,19 +1,14 @@
-use anyhow::Result;
-use libp2p::{
-    PeerId, Transport,
-    core::upgrade,
-    futures::StreamExt,
-    mdns, noise,
-    swarm::{SwarmBuilder, SwarmEvent},
-    tcp, yamux,
-};
-use std::error::Error;
-use tracing::{error, info, warn};
-use tracing_subscriber;
-
 mod network;
 mod storage;
 mod sync;
+
+use anyhow::Result;
+use libp2p::{
+    PeerId, Swarm, SwarmBuilder, futures::StreamExt, mdns, noise, swarm::SwarmEvent, tcp, yamux,
+};
+use std::error::Error;
+use std::time::Duration;
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -76,24 +71,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
 // ─────────────────────────────────────────────────────────────────────────────
 //  WEEK 1 DAY 1-2: P2P NETWORK SETUP
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Initialize libp2p swarm with TCP transport, Noise encryption, and mDNS discovery
-async fn setup_network() -> Result<()> {
-    // TODO: Implement network setup
-    // 1. Generate keypair: let local_key = libp2p::identity::Keypair::generate_ed25519();
+async fn setup_network() -> Result<Swarm<mdns::tokio::Behaviour>> {
     let local_key = libp2p::identity::Keypair::generate_ed25519();
-    // 2. Get PeerId from keypair: let local_peer_id = PeerId::from(local_key.public());
-    let local_per_id = PeerId::from(local_key.public());
-    // 3. Build transport:
-    //    - TCP transport
-    //    - Noise for encryption
-    //    - Yamux for multiplexing
-    // 4. Create behaviour with mDNS
-    // 5. Build swarm
-    // 6. Listen on /ip4/0.0.0.0/tcp/0
+    let local_peer_id = PeerId::from(local_key.public());
 
-    info!("TODO: Network setup not yet implemented");
-    Ok(())
+    let mdns_config = mdns::Config::default();
+    let mdns_behav = mdns::tokio::Behaviour::new(mdns_config, local_peer_id)?;
+
+    let mut swarm = SwarmBuilder::with_existing_identity(local_key)
+        .with_tokio()
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )?
+        .with_behaviour(|_| mdns_behav)?
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+        .build();
+
+    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+
+    Ok(swarm)
 }
 
 /// Handle swarm events (peer discovery, connections, incoming messages)
