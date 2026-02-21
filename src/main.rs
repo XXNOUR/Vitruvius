@@ -3,15 +3,17 @@ mod storage;
 mod sync;
 
 use anyhow::Result;
+use libp2p::Multiaddr;
 use libp2p::{
     PeerId, Swarm, SwarmBuilder, futures::StreamExt, mdns, noise, swarm::SwarmEvent, tcp, yamux,
 };
-use std::error::Error;
 use std::time::Duration;
+use std::{collections::HashMap, error::Error};
 use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let discoverd_peers: HashMap<PeerId, Vec<Multiaddr>> = HashMap::new();
     // Initialize logging
     tracing_subscriber::fmt::init();
 
@@ -66,61 +68,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  WEEK 1 DAY 1-2: P2P NETWORK SETUP
-// ─────────────────────────────────────────────────────────────────────────────
-async fn setup_network() -> Result<Swarm<mdns::tokio::Behaviour>> {
-    let local_key = libp2p::identity::Keypair::generate_ed25519();
-    let local_peer_id = PeerId::from(local_key.public());
-
-    let mdns_config = mdns::Config::default();
-    let mdns_behav = mdns::tokio::Behaviour::new(mdns_config, local_peer_id)?;
-
-    let mut swarm = SwarmBuilder::with_existing_identity(local_key)
-        .with_tokio()
-        .with_tcp(
-            tcp::Config::default(),
-            noise::Config::new,
-            yamux::Config::default,
-        )?
-        .with_behaviour(|_| mdns_behav)?
-        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
-        .build();
-
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
-
-    Ok(swarm)
-}
-
-/// Handle swarm events (peer discovery, connections, incoming messages)
-async fn handle_swarm_event(event: SwarmEvent<mdns::Event>) {
-    match event {
-        SwarmEvent::Behaviour(mdns::Event::Discovered(peers)) => {
-            for (peer_id, addr) in peers {
-                info!("🔍 Discovered peer: {} at {}", peer_id, addr);
-                // TODO: Store discovered peer
-                // TODO: Initiate connection if needed
-            }
-        }
-        SwarmEvent::Behaviour(mdns::Event::Expired(peers)) => {
-            for (peer_id, addr) in peers {
-                warn!("❌ Peer expired: {} at {}", peer_id, addr);
-                // TODO: Remove peer from known peers
-            }
-        }
-        SwarmEvent::NewListenAddr { address, .. } => {
-            info!("👂 Listening on: {}", address);
-        }
-        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-            info!("🤝 Connected to peer: {}", peer_id);
-        }
-        SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
-            warn!("🔌 Connection closed with {}: {:?}", peer_id, cause);
-        }
-        _ => {}
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
