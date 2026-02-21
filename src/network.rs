@@ -3,7 +3,7 @@ use libp2p::{Multiaddr, PeerId, Swarm, SwarmBuilder, mdns, noise, swarm::SwarmEv
 use std::{collections::HashMap, time::Duration};
 use tracing::{info, warn};
 
-async fn setup_network() -> Result<Swarm<mdns::tokio::Behaviour>> {
+pub async fn setup_network() -> Result<Swarm<mdns::tokio::Behaviour>> {
     let local_key = libp2p::identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
 
@@ -27,7 +27,7 @@ async fn setup_network() -> Result<Swarm<mdns::tokio::Behaviour>> {
 }
 
 /// Handle swarm events (peer discovery, connections, incoming messages)
-async fn handle_swarm_event(
+pub async fn handle_swarm_event(
     event: SwarmEvent<mdns::Event>,
     discoverd_peers: &mut HashMap<PeerId, Vec<Multiaddr>>,
 ) {

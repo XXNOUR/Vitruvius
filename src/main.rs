@@ -13,47 +13,20 @@ use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let discoverd_peers: HashMap<PeerId, Vec<Multiaddr>> = HashMap::new();
-    // Initialize logging
     tracing_subscriber::fmt::init();
+    info!(" Starting Vitruvius...");
 
-    info!("🚀 Starting Vitruvius...");
-
-    // TODO Week 1 Day 1-2: Setup P2P network
-    // - Create local keypair
-    // - Build libp2p transport (TCP + Noise + Yamux)
-    // - Setup mDNS for peer discovery
-    // - Create and configure swarm
+    let mut swarm = crate::network::setup_network().await?;
+    let mut discoverd_peers: HashMap<PeerId, Vec<Multiaddr>> = HashMap::new();
 
     info!("✓ Network initialized");
-
-    // TODO Week 1 Day 3-4: File transfer protocol
-    // - Define custom protocol for file transfer
-    // - Register protocol handler with swarm
-
-    // TODO Week 1 Day 5-6: Chunking and hashing
-    // - Implement file chunking (1MB chunks)
-    // - Add BLAKE3 hash verification
-
-    // TODO Week 2 Day 8-9: File watching
-    // - Setup notify file watcher on sync directory
-    // - Queue file changes for transmission
-
-    // TODO Week 2 Day 10-11: Delta sync
-    // - Compare chunk hashes to detect changes
-    // - Only send modified chunks
-
-    // TODO Week 2 Day 12-13: Bidirectional sync
-    // - Handle incoming and outgoing changes simultaneously
-    // - Basic conflict resolution (last-write-wins)
-
-    // Main event loop
     loop {
         tokio::select! {
-            // TODO: Handle swarm events (peer discovery, connections, messages)
-            // event = swarm.select_next_some() => {
-            //     handle_swarm_event(event).await;
-            // }
+             event = swarm.select_next_some() => {
+
+                 crate::network::handle_swarm_event(event,&mut discoverd_peers).await;
+
+             }
 
             // TODO: Handle file system events from watcher
             // event = watcher_rx.recv() => {
