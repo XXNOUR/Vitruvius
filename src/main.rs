@@ -3,10 +3,13 @@ mod storage;
 mod sync;
 
 use anyhow::Result;
+use dialoguer::Input;
 use libp2p::Multiaddr;
 use libp2p::{
     PeerId, Swarm, SwarmBuilder, futures::StreamExt, mdns, noise, swarm::SwarmEvent, tcp, yamux,
 };
+use std::fs;
+use std::path::PathBuf;
 use std::time::Duration;
 use std::{collections::HashMap, error::Error};
 use tracing::{info, warn};
@@ -20,11 +23,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut discoverd_peers: HashMap<PeerId, Vec<Multiaddr>> = HashMap::new();
 
     info!("✓ Network initialized");
+
     loop {
         tokio::select! {
              event = swarm.select_next_some() => {
 
-                 crate::network::handle_swarm_event(event,&mut discoverd_peers).await;
+                 crate::network::handle_swarm_event(&mut swarm).await?;
 
              }
 
