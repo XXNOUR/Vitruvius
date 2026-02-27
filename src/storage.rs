@@ -1,7 +1,8 @@
 // src/storage.rs
 use anyhow::Result;
 use libp2p::PeerId;
-use std::fs;
+use std::fs::{self, File, read_to_string};
+use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use tracing::info;
 
@@ -58,29 +59,44 @@ pub async fn receive_file(
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  WEEK 1 DAY 5-6: CHUNKING & HASHING (for next week)
-// ─────────────────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct Chunk {
     pub index: usize,
     pub data: Vec<u8>,
     pub hash: [u8; 32],
 }
-
+impl Chunk {
+    fn new(index: usize, data: Vec<u8>, hash: [u8; 32]) -> Self {
+        Chunk { index, data, hash }
+    }
+}
 /// Split a file into chunks and compute BLAKE3 hash for each
 pub fn chunk_file(file_path: &PathBuf) -> Result<Vec<Chunk>> {
-    // TODO: Implement for Week 1 Day 5-6
-    // 1. Read file
-    // 2. Split into 1MB chunks
-    // 3. Hash each chunk with BLAKE3
-    // 4. Return vector of Chunk structs
-
     const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
+    let file = File::open(file_path)?;
+    let mut reader = BufReader::new(file);
 
-    info!("TODO: File chunking not yet implemented");
-    Ok(vec![])
+    let mut chunks: Vec<Chunk> = Vec::new();
+
+    let mut index = 0;
+
+    loop {
+        let mut buffer = vec![0u8; CHUNK_SIZE];
+
+        let bytes_read = reader.read(&mut buffer)?;
+
+        if bytes_read == 0 {
+            break;
+        }
+        buffer.truncate(bytes_read);
+
+        let hash = blake3::hash(&buffer);
+
+        chunks.push(Chunk::new(index, buffer, hash.into()));
+        index += 1;
+    }
+
+    Ok(chunks)
 }
 
 /// Verify a chunk's integrity using BLAKE3 hash
