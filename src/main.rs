@@ -1,17 +1,18 @@
 // src/main.rs
 mod network;
 mod storage;
-mod sync;
 
 use anyhow::Result;
 use dialoguer::Input;
 use libp2p::{PeerId, futures::StreamExt, mdns, request_response, swarm::SwarmEvent};
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::network::{MyBehaviourEvent, SyncMessage};
+use crate::storage::FileTransferState;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -44,6 +45,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         info!("✓ Waiting for incoming connections...");
     }
 
+    // Track ongoing transfers
+    let mut transfer_states: HashMap<PeerId, FileTransferState> = HashMap::new();
+
     // Event loop
     loop {
         tokio::select! {
@@ -71,7 +75,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         // If we initiated the connection, send a request
                         if let Some(target) = target_peer_id {
                             if peer_id == target {
-                                info!("Sending file request...");
+                                info!("Requesting file metadata...");
                                 swarm.behaviour_mut().rr.send_request(
                                     &peer_id,
                                     SyncMessage::Request {
@@ -88,44 +92,98 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     )) => {
                         match message {
                             // Incoming request - we're the sender
-                            request_response::Message::Request { channel, .. } => {
-                                info!(" Received file request from {}", peer);
+                            request_response::Message::Request { channel, request,.. } => {
+                                match request {
+                                    SyncMessage::Request { file_name } => {
+                                        info!("📥 Received file request from {}", peer);
 
-                                // Prepare file (chunks it internally)
-                                let response = crate::storage::prepare_file_send(
-                                    peer,
-                                    &sync_path_abs
-                                ).await?;
+                                        // Send metadata
+                                        let response = crate::storage::get_file_metadata(
+                                            &sync_path_abs
+                                        ).await?;
+                                        let _ = swarm.behaviour_mut().rr.send_response(channel, response);
+                                    }
 
-                                // Send single response with all chunks
-                                let _ = swarm.behaviour_mut().rr.send_response(channel, response);
+                                    SyncMessage::ChunkRequest { chunk_index } => {
+                                        info!("📦 Received chunk request {} from {}", chunk_index, peer);
+
+                                        // Send specific chunk
+                                        let response = crate::storage::get_chunk(
+                                            &sync_path_abs,
+                                            chunk_index
+                                        ).await?;
+                                        let _ = swarm.behaviour_mut().rr.send_response(channel, response);
+                                    }
+
+                                    _ => {
+                                        warn!("🚫 Unexpected request type from {}", peer);
+                                    }
+                                }
                             }
 
                             // Incoming response - we're the receiver
                             request_response::Message::Response { response, .. } => {
                                 match response {
-                                    SyncMessage::FileTransfer {
-                                        file_name,
-                                        chunks,
-                                        file_size,
-                                        total_chunks: _
-                                    } => {
-                                        // Receive and verify all chunks
-                                        crate::storage::receive_file_transfer(
-                                            peer,
+                                    SyncMessage::Metadata { file_name, total_chunks, file_size, chunk_hashes } => {
+                                        info!("📋 Received metadata for '{}' ({} chunks, {} bytes)",
+                                              file_name, total_chunks, file_size);
+
+                                        // Initialize transfer state
+                                        let metadata = crate::storage::FileMetadata {
                                             file_name,
-                                            chunks,
+                                            total_chunks,
                                             file_size,
-                                            &sync_path_abs,
-                                        ).await?;
+                                            chunk_hashes,
+                                        };
+
+                                        let mut transfer_state = FileTransferState::new(sync_path_abs.clone());
+                                        transfer_state.metadata = Some(metadata);
+                                        transfer_states.insert(peer, transfer_state);
+
+                                        // Start requesting chunks
+                                        for i in 0..total_chunks {
+                                            swarm.behaviour_mut().rr.send_request(
+                                                &peer,
+                                                SyncMessage::ChunkRequest { chunk_index: i }
+                                            );
+                                        }
+                                    }
+
+                                    SyncMessage::ChunkResponse { chunk_index, data, hash } => {
+                                        if let Some(transfer_state) = transfer_states.get_mut(&peer) {
+                                            match crate::storage::process_received_chunk(
+                                                peer,
+                                                chunk_index,
+                                                data,
+                                                hash,
+                                                transfer_state
+                                            ).await {
+                                                Ok(complete) => {
+                                                    if complete {
+                                                        // Send completion acknowledgment
+                                                        swarm.behaviour_mut().rr.send_request(
+                                                            &peer,
+                                                            SyncMessage::TransferComplete
+                                                        );
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    error!("Failed to process chunk {}: {}", chunk_index, e);
+                                                }
+                                            }
+                                        }
                                     }
 
                                     SyncMessage::Empty => {
-                                        info!("Remote folder is empty");
+                                        info!("📭 Remote folder is empty");
                                     }
 
-                                    SyncMessage::Request { .. } => {
-                                        warn!("  Unexpected Request in response");
+                                    SyncMessage::Error { message } => {
+                                        error!("❌ Error from {}: {}", peer, message);
+                                    }
+
+                                    _ => {
+                                        warn!("🚫 Unexpected response type from {}", peer);
                                     }
                                 }
                             }
@@ -143,7 +201,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             // Handle Ctrl+C gracefully
             _ = tokio::signal::ctrl_c() => {
-                info!(" Shutting down...");
+                info!("🛑 Shutting down...");
                 break;
             }
         }

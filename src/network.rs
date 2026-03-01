@@ -4,23 +4,37 @@ use libp2p::{PeerId, StreamProtocol, Swarm, mdns, request_response};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::storage::Chunk;
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SyncMessage {
-    /// Request to sync a file
+    /// Request to sync a file  
     Request { file_name: String },
 
-    /// Complete file transfer with all chunks
-    FileTransfer {
+    /// File metadata (chunk count, size, hashes)  
+    Metadata {
         file_name: String,
         total_chunks: usize,
         file_size: u64,
-        chunks: Vec<Chunk>,
+        chunk_hashes: Vec<[u8; 32]>,
     },
 
-    /// Remote folder is empty
+    /// Request for a specific chunk  
+    ChunkRequest { chunk_index: usize },
+
+    /// Response containing a single chunk  
+    ChunkResponse {
+        chunk_index: usize,
+        data: Vec<u8>,
+        hash: [u8; 32],
+    },
+
+    /// Transfer completed successfully  
+    TransferComplete,
+
+    /// Remote folder is empty  
     Empty,
+
+    /// Error message  
+    Error { message: String },
 }
 
 #[derive(libp2p::swarm::NetworkBehaviour)]
@@ -47,9 +61,9 @@ pub async fn setup_network() -> Result<Swarm<MyBehaviour>> {
                 mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?;
             let mut config = request_response::Config::default();
 
-            // Longer timeout for large files
+            // Shorter timeout for individual chunks
             #[allow(deprecated)]
-            config.set_request_timeout(Duration::from_secs(60));
+            config.set_request_timeout(Duration::from_secs(10));
 
             let rr = libp2p::request_response::cbor::Behaviour::<SyncMessage, SyncMessage>::new(
                 [(
@@ -60,7 +74,7 @@ pub async fn setup_network() -> Result<Swarm<MyBehaviour>> {
             );
             Ok(MyBehaviour { mdns, rr })
         })?
-        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(30)))
         .build();
 
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
