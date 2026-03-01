@@ -5,7 +5,7 @@ mod sync;
 
 use anyhow::Result;
 use dialoguer::Input;
-use libp2p::{PeerId, Swarm, futures::StreamExt, mdns, request_response, swarm::SwarmEvent};
+use libp2p::{PeerId, futures::StreamExt, mdns, request_response, swarm::SwarmEvent};
 use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                     // Connection established
                     SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                        info!("✓ Connected to {}", peer_id);
+                        info!("Connected to {}", peer_id);
 
                         // If we initiated the connection, send a request
                         if let Some(target) = target_peer_id {
@@ -74,9 +74,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 info!("Sending file request...");
                                 swarm.behaviour_mut().rr.send_request(
                                     &peer_id,
-                                    SyncMessage {
+                                    SyncMessage::Request {
                                         file_name: "MANIFEST_REQ".into(),
-                                        content: None,
                                     },
                                 );
                             }
@@ -90,21 +89,45 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         match message {
                             // Incoming request - we're the sender
                             request_response::Message::Request { channel, .. } => {
-                                info!("Received file request from {}", peer);
+                                info!(" Received file request from {}", peer);
 
-                                // Read file from disk
-                                let response = crate::storage::send_file(peer, &sync_path_abs).await?;
+                                // Prepare file (chunks it internally)
+                                let response = crate::storage::prepare_file_send(
+                                    peer,
+                                    &sync_path_abs
+                                ).await?;
 
-                                // Send response back
+                                // Send single response with all chunks
                                 let _ = swarm.behaviour_mut().rr.send_response(channel, response);
                             }
 
                             // Incoming response - we're the receiver
                             request_response::Message::Response { response, .. } => {
-                                info!("Received file response from {}", peer);
+                                match response {
+                                    SyncMessage::FileTransfer {
+                                        file_name,
+                                        chunks,
+                                        file_size,
+                                        total_chunks: _
+                                    } => {
+                                        // Receive and verify all chunks
+                                        crate::storage::receive_file_transfer(
+                                            peer,
+                                            file_name,
+                                            chunks,
+                                            file_size,
+                                            &sync_path_abs,
+                                        ).await?;
+                                    }
 
-                                // Write file to disk
-                                crate::storage::receive_file(peer, response, &sync_path_abs).await?;
+                                    SyncMessage::Empty => {
+                                        info!("Remote folder is empty");
+                                    }
+
+                                    SyncMessage::Request { .. } => {
+                                        warn!("  Unexpected Request in response");
+                                    }
+                                }
                             }
                         }
                     }
@@ -120,7 +143,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             // Handle Ctrl+C gracefully
             _ = tokio::signal::ctrl_c() => {
-                info!("Shutting down...");
+                info!(" Shutting down...");
                 break;
             }
         }
