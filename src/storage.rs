@@ -90,7 +90,7 @@ pub async fn prepare_file_send(peer_id: PeerId, sync_path: &PathBuf) -> Result<S
     }
 
     // No files found
-    info!("📭 No files to send");
+    info!(" No files to send");
     Ok(SyncMessage::Empty)
 }
 
