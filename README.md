@@ -17,11 +17,11 @@ Named after Leonardo da Vinci's *Vitruvian Man* — a study of ideal proportion 
 
 ### Key Features
 
-- **🔐 Zero-Knowledge Encryption** — Files are encrypted client-side with ChaCha20-Poly1305 before leaving your device. Sync nodes see only opaque ciphertext.
-- **🌐 Fully Decentralized** — Built on libp2p for peer discovery and direct device-to-device sync. No central server to trust or compromise.
-- **📜 Version History** — Content-addressed storage with BLAKE3 hashing preserves every file version and enables point-in-time recovery.
-- **♻️ Deduplication** — Identical content blocks are stored only once across all files, saving storage and bandwidth.
-- **🦀 Written in Rust** — Memory safety and performance guaranteed at compile time, with no garbage collection overhead.
+- **Zero-Knowledge Encryption** — Files are encrypted client-side with ChaCha20-Poly1305 before leaving your device. Sync nodes see only opaque ciphertext.
+- ** Fully Decentralized** — Built on libp2p for peer discovery and direct device-to-device sync. No central server to trust or compromise.
+- ** Version History** — Content-addressed storage with BLAKE3 hashing preserves every file version and enables point-in-time recovery.
+- ** Deduplication** — Identical content blocks are stored only once across all files, saving storage and bandwidth.
+- ** Written in Rust** — Memory safety and performance guaranteed at compile time, with no garbage collection overhead.
 
 ---
 
@@ -128,7 +128,7 @@ This project is being developed over **10 weeks** as part of a Computer Science 
 | **Phase 4: Version History** | Weeks 7–8 | Content-addressed storage, version index, block deduplication |
 | **Phase 5: Polish & Demo** | Weeks 9–10 | Terminal UI, end-to-end testing, documentation, presentation |
 
-**Current Status:** Phase 1 (Foundation) ✅ In Progress
+**Current Status:** Phase 1 (Foundation) In Progress
 
 ---
 
@@ -196,7 +196,7 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 
 ## Security Notice
 
-⚠️ **Vitruvius is pre-alpha software under active development.** It has not been audited by professional cryptographers and should **not** be used for production data or any scenario where data loss or security compromise would have serious consequences.
+ **Vitruvius is pre-alpha software under active development.** It has not been audited by professional cryptographers and should **not** be used for production data or any scenario where data loss or security compromise would have serious consequences.
 
 The encryption implementation uses well-established libraries (ChaCha20-Poly1305 via Rust's `chacha20poly1305` crate), but the overall protocol and key management strategy have not been independently verified.
 
