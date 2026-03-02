@@ -6,16 +6,10 @@ use std::time::Duration;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SyncMessage {
-    Request {
-        file_name: String,
-    },
+    /// Request to sync a file  
+    Request { file_name: String },
 
-    ListFiles,
-
-    FileList {
-        file_names: Vec<String>,
-    },
-
+    /// File metadata (chunk count, size, hashes)  
     Metadata {
         file_name: String,
         total_chunks: usize,
@@ -23,28 +17,24 @@ pub enum SyncMessage {
         chunk_hashes: Vec<[u8; 32]>,
     },
 
-    ChunkRequest {
-        file_name: String,
-        chunk_index: usize,
-    },
+    /// Request for a specific chunk  
+    ChunkRequest { chunk_index: usize },
 
+    /// Response containing a single chunk  
     ChunkResponse {
         chunk_index: usize,
         data: Vec<u8>,
         hash: [u8; 32],
     },
 
-    FileChanged {
-        file_name: String,
-    },
-
+    /// Transfer completed successfully  
     TransferComplete,
 
+    /// Remote folder is empty  
     Empty,
 
-    Error {
-        message: String,
-    },
+    /// Error message  
+    Error { message: String },
 }
 
 #[derive(libp2p::swarm::NetworkBehaviour)]
@@ -71,6 +61,7 @@ pub async fn setup_network() -> Result<Swarm<MyBehaviour>> {
                 mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?;
             let mut config = request_response::Config::default();
 
+            // Shorter timeout for individual chunks
             #[allow(deprecated)]
             config.set_request_timeout(Duration::from_secs(10));
 
