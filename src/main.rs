@@ -95,7 +95,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             request_response::Message::Request { channel, request,.. } => {
                                 match request {
                                     SyncMessage::Request { file_name } => {
-                                        info!("📥 Received file request from {}", peer);
+                                        info!(" Received file request from {}", peer);
 
                                         // Send metadata
                                         let response = crate::storage::get_file_metadata(
@@ -105,7 +105,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     }
 
                                     SyncMessage::ChunkRequest { chunk_index } => {
-                                        info!("📦 Received chunk request {} from {}", chunk_index, peer);
+                                        info!(" Received chunk request {} from {}", chunk_index, peer);
 
                                         // Send specific chunk
                                         let response = crate::storage::get_chunk(
@@ -116,7 +116,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     }
 
                                     _ => {
-                                        warn!("🚫 Unexpected request type from {}", peer);
+                                        warn!(" Unexpected request type from {}", peer);
                                     }
                                 }
                             }
@@ -125,7 +125,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             request_response::Message::Response { response, .. } => {
                                 match response {
                                     SyncMessage::Metadata { file_name, total_chunks, file_size, chunk_hashes } => {
-                                        info!("📋 Received metadata for '{}' ({} chunks, {} bytes)",
+                                        info!(" Received metadata for '{}' ({} chunks, {} bytes)",
                                               file_name, total_chunks, file_size);
 
                                         // Initialize transfer state
@@ -175,15 +175,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     }
 
                                     SyncMessage::Empty => {
-                                        info!("📭 Remote folder is empty");
+                                        info!("Remote folder is empty");
                                     }
 
                                     SyncMessage::Error { message } => {
-                                        error!("❌ Error from {}: {}", peer, message);
+                                        error!("Error from {}: {}", peer, message);
                                     }
 
                                     _ => {
-                                        warn!("🚫 Unexpected response type from {}", peer);
+                                        warn!("Unexpected response type from {}", peer);
                                     }
                                 }
                             }
@@ -201,7 +201,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             // Handle Ctrl+C gracefully
             _ = tokio::signal::ctrl_c() => {
-                info!("🛑 Shutting down...");
+                info!("Shutting down...");
                 break;
             }
         }
