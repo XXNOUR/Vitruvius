@@ -88,7 +88,7 @@ pub fn chunk_file(file_path: &PathBuf) -> Result<(Vec<Chunk>, FileMetadata)> {
         chunk_hashes,
     };
 
-    info!("✂️  Chunked file into {} chunks", chunks.len());
+    info!("Chunked file into {} chunks", chunks.len());
     Ok((chunks, metadata))
 }
 
