@@ -2,19 +2,18 @@
 mod network;
 mod storage;
 
+use crate::network::{MyBehaviourEvent, SyncMessage};
+use crate::storage::FileTransferState;
 use anyhow::Result;
 use dialoguer::Input;
 use libp2p::{PeerId, futures::StreamExt, mdns, request_response, swarm::SwarmEvent};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
-
-use crate::network::{MyBehaviourEvent, SyncMessage};
-use crate::storage::FileTransferState;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -22,6 +21,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("Starting Vitruvius...");
 
     let mut swarm = crate::network::setup_network().await?;
+
+    let mut currently_writing: HashSet<String> = HashSet::new();
 
     let target_id_str: String = Input::new()
         .with_prompt("Enter Peer ID to sync with (or leave empty to wait)")
@@ -205,6 +206,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                     ).await {
                                                         Ok(complete) => {
                                                             if complete {
+                                                                currently_writing.insert(file_name.clone());
+                                                               tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                                                                currently_writing.remove(file_name);
+
                                                                 info!("Transfer complete for: {}", file_name);
                                                             }
                                                         }
@@ -249,6 +254,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             if path.is_file() {
                                 if let Some(file_name) = path.file_name() {
                                     let file_name_str = file_name.to_str().unwrap().to_string();
+
+                                    if currently_writing.contains(&file_name_str) {
+                                        continue;
+                                    }
                                     info!("File changed: {}", file_name_str);
 
                                     for peer in &connected_peers {
