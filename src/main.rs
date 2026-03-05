@@ -7,7 +7,6 @@ use crate::storage::FileTransferState;
 use anyhow::Result;
 use dialoguer::Input;
 use libp2p::{PeerId, futures::StreamExt, mdns, request_response, swarm::SwarmEvent};
-use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
@@ -22,7 +21,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut swarm = crate::network::setup_network().await?;
 
-    let mut currently_writing: HashSet<String> = HashSet::new();
+    // let mut currently_writing: HashSet<String> = HashSet::new();
 
     let target_id_str: String = Input::new()
         .with_prompt("Enter Peer ID to sync with (or leave empty to wait)")
@@ -46,15 +45,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         info!("Waiting for incoming connections...");
     }
 
-    let (file_tx, mut file_rx) = mpsc::channel::<Event>(100);
+    // let (file_tx, mut file_rx) = mpsc::channel::<Event>(100);
 
-    let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
-        if let Ok(event) = res {
-            let _ = file_tx.blocking_send(event);
-        }
-    })?;
+    // let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
+    //     if let Ok(event) = res {
+    //         let _ = file_tx.blocking_send(event);
+    //     }
+    // })?;
 
-    watcher.watch(&sync_path_abs, RecursiveMode::Recursive)?;
+    // watcher.watch(&sync_path_abs, RecursiveMode::Recursive)?;
     info!("Watching folder for changes");
 
     let mut transfer_states: HashMap<String, FileTransferState> = HashMap::new();
@@ -206,9 +205,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                     ).await {
                                                         Ok(complete) => {
                                                             if complete {
-                                                                currently_writing.insert(file_name.clone());
+                                                                // currently_writing.insert(file_name.clone());
                                                                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-                                                                currently_writing.remove(file_name);
+                                                                // currently_writing.remove(file_name);
 
                                                                 info!("Transfer complete for: {}", file_name);
                                                             }
@@ -247,34 +246,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
 
-            Some(file_event) = file_rx.recv() => {
-                match file_event.kind {
-                    EventKind::Create(_) | EventKind::Modify(_) => {
-                        for path in file_event.paths {
-                            if path.is_file() {
-                                if let Some(file_name) = path.file_name() {
-                                    let file_name_str = file_name.to_str().unwrap().to_string();
+            // Some(file_event) = file_rx.recv() => {
+                // match file_event.kind {
+                    // EventKind::Create(_) | EventKind::Modify(_) => {
+                        // for path in file_event.paths {
+                            // if path.is_file() {
+                                // if let Some(file_name) = path.file_name() {
+                                    // let file_name_str = file_name.to_str().unwrap().to_string();
 
-                                    if currently_writing.contains(&file_name_str) {
-                                        continue;
-                                    }
-                                    info!("File changed: {}", file_name_str);
+                                    // if currently_writing.contains(&file_name_str) {
+                                        // continue;
+                                    // }
+                                    // info!("File changed: {}", file_name_str);
 
-                                    for peer in &connected_peers {
-                                        swarm.behaviour_mut().rr.send_request(
-                                            peer,
-                                            SyncMessage::FileChanged {
-                                                file_name: file_name_str.clone()
-                                            }
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+                                    // for peer in &connected_peers {
+                                        // swarm.behaviour_mut().rr.send_request(
+                                            // peer,
+                                            // SyncMessage::FileChanged {
+                                                // file_name: file_name_str.clone()
+                                            // }
+                                        // );
+                                    // }
+                                // }
+                            // }
+                        // }
+                    // }
+                    // _ => {}
+                // }
+            // }
 
             _ = tokio::signal::ctrl_c() => {
                 info!("Shutting down...");

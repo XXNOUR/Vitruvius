@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::network::SyncMessage;
 
