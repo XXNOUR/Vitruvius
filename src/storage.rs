@@ -173,7 +173,7 @@ pub async fn process_received_chunk(
         if transfer_state.received_chunks.len() == metadata.total_chunks {
             // Reassemble file
             reassemble_file(transfer_state)?;
-            info!("✅ File transfer completed: {}", metadata.file_name);
+            info!("File transfer completed: {}", metadata.file_name);
             return Ok(true);
         }
     }
