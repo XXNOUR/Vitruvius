@@ -258,7 +258,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                                 error!("Failed to process chunk {}: {}", chunk_index, e);
                                                             }
                                                         }
-                                                        break;
 
 
                                             }
