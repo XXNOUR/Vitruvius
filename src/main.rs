@@ -2,7 +2,7 @@
 mod network;
 mod storage;
 
-use crate::network::{MyBehaviourEvent, SyncMessage};
+use crate::network::{MyBehaviourEvent, SyncMessage, SyncSession};
 use crate::storage::FileTransferState;
 use anyhow::Result;
 use dialoguer::Input;
@@ -157,13 +157,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     SyncMessage::FileList { file_names } => {
                                         info!("Received file list with {} files", file_names.len());
 
-                                        for file_name in file_names {
-                                            info!("Requesting metadata for: {}", file_name);
-                                            swarm.behaviour_mut().rr.send_request(
-                                                &peer,
-                                                SyncMessage::Request { file_name }
-                                            );
+
+                                        info!("Creating a new Sync Sesion with all the files");
+
+                                        let  mut sync_session : SyncSession = SyncSession::new(file_names);
+
+                                        while sync_session.can_start_more() {
+
+                                            if let Some(file) = sync_session.
+
+
+
+
+
+
+
+
                                         }
+
+
+
                                     }
 
                                     SyncMessage::Metadata { file_name, total_chunks, file_size, chunk_hashes } => {

@@ -2,7 +2,12 @@
 use anyhow::Result;
 use libp2p::{PeerId, StreamProtocol, Swarm, mdns, request_response};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
+
+use crate::storage::FileTransferState;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SyncMessage {
@@ -46,6 +51,42 @@ pub enum SyncMessage {
     Error {
         message: String,
     },
+}
+pub struct SyncSession {
+ pub   pending_file: Vec<String>,
+  pub   active_transfers: HashMap<String, FileTransferState>,
+   pub  completed_files: HashSet<String>,
+   pub  max_conc: usize,
+}
+
+impl SyncSession {
+    pub fn new(file_list: Vec<String>) -> Self {
+        SyncSession {
+            pending_file: file_list,
+            active_transfers: HashMap::new(),
+            completed_files: HashSet::new(),
+            max_conc: 3,
+        }
+    }
+
+    pub fn can_start_more(&self) -> bool {
+        self.active_transfers.len() < self.max_conc && !self.pending_file.is_empty()
+    }
+
+    pub fn start_next(&mut self) -> Option<String> {
+        if self.can_start_more() {
+            self.pending_file.pop()
+        } else {
+            None
+        }
+    }
+    pub fn mark_complete(&mut self, file_name: &str) {
+        self.active_transfers.remove(file_name);
+        self.completed_files.insert(file_name.to_string());
+    }
+    pub fn is_done(&self) -> bool {
+        self.pending_file.is_empty() && self.active_transfers.is_empty()
+    }
 }
 
 #[derive(libp2p::swarm::NetworkBehaviour)]
