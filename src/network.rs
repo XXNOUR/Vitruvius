@@ -11,7 +11,7 @@ use crate::storage::FileTransferState;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SyncMessage {
-    Request {
+    MetaDataRequest {
         file_name: String,
     },
 
@@ -53,19 +53,19 @@ pub enum SyncMessage {
     },
 }
 pub struct SyncSession {
- pub   pending_file: Vec<String>,
-  pub   active_transfers: HashMap<String, FileTransferState>,
-   pub  completed_files: HashSet<String>,
-   pub  max_conc: usize,
+    pub pending_file: Vec<String>,
+    pub active_transfers: HashMap<String, FileTransferState>,
+    pub completed_files: HashSet<String>,
+    pub max_conc: usize,
 }
 
 impl SyncSession {
-    pub fn new(file_list: Vec<String>) -> Self {
+    pub fn new(file_list: Vec<String>, max: usize) -> Self {
         SyncSession {
             pending_file: file_list,
             active_transfers: HashMap::new(),
             completed_files: HashSet::new(),
-            max_conc: 3,
+            max_conc: max,
         }
     }
 
