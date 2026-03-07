@@ -148,6 +148,7 @@ pub async fn get_chunk(
             chunk_index: chunk.index,
             data: chunk.data.clone(),
             hash: chunk.hash,
+            file_name: file_name.into(),
         })
     } else {
         Ok(SyncMessage::Error {

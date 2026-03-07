@@ -192,16 +192,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         }
                                     }
 
-                                    SyncMessage::ChunkResponse { chunk_index, data, hash } => {
-                                        for (file_name, transfer_state) in transfer_states.iter_mut() {
-                                            if let Some(metadata) = &transfer_state.metadata {
-                                                if transfer_state.received_chunks.len() < metadata.total_chunks {
+                                    SyncMessage::ChunkResponse { chunk_index, data, hash,file_name } => {
+
+
+
+                                        let mut transfer_needed = transfer_states.get_mut(&file_name).unwrap();
+
+                                        if let Some(metadata) = &transfer_needed.metadata {
+
+                                                if transfer_needed.received_chunks.len() < metadata.total_chunks{
                                                     match crate::storage::process_received_chunk(
                                                         peer,
                                                         chunk_index,
                                                         data.clone(),
                                                         hash,
-                                                        transfer_state
+                                                        &mut transfer_needed
                                                     ).await {
                                                         Ok(complete) => {
                                                             if complete {
@@ -217,9 +222,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                         }
                                                     }
                                                     break;
-                                                }
-                                            }
+
+
                                         }
+                                        }
+
                                     }
 
                                     SyncMessage::Empty => {

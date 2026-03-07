@@ -32,6 +32,7 @@ pub enum SyncMessage {
         chunk_index: usize,
         data: Vec<u8>,
         hash: [u8; 32],
+        file_name: String,
     },
 
     FileChanged {
