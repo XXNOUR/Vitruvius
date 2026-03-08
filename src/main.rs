@@ -233,9 +233,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                         ).await {
                                                             Ok(complete) => {
                                                                 if complete {
-                                                                    // currently_writing.insert(file_name.clone());
+                                                                    currently_writing.insert(file_name.clone());
                                                                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-                                                                    // currently_writing.remove(file_name);
+                                                                    currently_writing.remove(&file_name);
 
                                                                     info!("Transfer complete for: {}", file_name);
 
