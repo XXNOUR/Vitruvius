@@ -18,21 +18,30 @@ pub fn verify_chunk(data: &[u8], expected_hash: &[u8; 32]) -> bool {
 pub async fn get_file_list(sync_path: &PathBuf) -> Result<Vec<String>> {
     let mut files = Vec::new();
 
-    if let Ok(entries) = fs::read_dir(sync_path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                // Skip hidden files and temporary files
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if !name.starts_with('.') && !name.ends_with(".tmp") {
-                        files.push(name.to_string());
+    fn recurse(dir: &PathBuf, base: &PathBuf, out: &mut Vec<String>) -> std::io::Result<()> {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Ok(rel) = path.strip_prefix(base) {
+                        if let Some(name) = rel.to_str() {
+                            // Skip hidden/temporary
+                            if !name.starts_with('.') && !name.ends_with(".tmp") {
+                                out.push(name.to_string());
+                            }
+                        }
                     }
+                } else if path.is_dir() {
+                    recurse(&path, base, out)?;
                 }
             }
         }
+        Ok(())
     }
 
-    info!("Found {} files in directory", files.len());
+    recurse(sync_path, sync_path, &mut files)?;
+
+    info!("Found {} files in directory (recursive)", files.len());
     Ok(files)
 }
 
@@ -132,6 +141,12 @@ fn reassemble_file(transfer_state: &FileTransferState) -> Result<()> {
 
     // Write to temporary file first, then rename (atomic write)
     let output_path = transfer_state.file_path.join(&metadata.file_name);
+
+    // ensure parent directory exists (handles nested relative paths)
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
     let temp_path = output_path.with_extension("tmp");
 
     {

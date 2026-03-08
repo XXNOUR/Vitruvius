@@ -39,6 +39,16 @@ pub enum SyncMessage {
         file_name: String,
     },
 
+    /// A directory was created (relative path from sync root)
+    DirectoryCreated {
+        path: String,
+    },
+
+    /// A directory was removed
+    DirectoryDeleted {
+        path: String,
+    },
+
     TransferComplete,
 
     Empty,

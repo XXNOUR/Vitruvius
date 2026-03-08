@@ -4,8 +4,9 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::PathBuf;
 use tracing::info;
+use rayon::prelude::*;
 
-const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
+const CHUNK_SIZE: usize = 16 * 1024 * 1024; // 16MB chunks for better Performance
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Chunk {
@@ -26,35 +27,7 @@ use super::metadata::FileMetadata;
 pub fn chunk_file(file_path: &PathBuf) -> Result<(Vec<Chunk>, FileMetadata)> {
     let file = File::open(file_path)?;
     let file_size = file.metadata()?.len();
-    let mut reader = BufReader::new(file);
-    let mut chunks: Vec<Chunk> = Vec::new();
-    let mut chunk_hashes: Vec<[u8; 32]> = Vec::new();
-    let mut index = 0;
-
-    loop {
-        let mut buffer = vec![0u8; CHUNK_SIZE];
-        let bytes_read = reader.read(&mut buffer)?;
-
-        if bytes_read == 0 {
-            break;
-        }
-
-        buffer.truncate(bytes_read);
-        let hash = blake3::hash(&buffer);
-        let hash_bytes = hash.into();
-
-        chunks.push(Chunk::new(index, buffer, hash_bytes));
-        chunk_hashes.push(hash_bytes);
-        index += 1;
-    }
-
-    // Handle empty files
-    if chunks.is_empty() {
-        let hash = blake3::hash(&[]);
-        let hash_bytes = hash.into();
-        chunks.push(Chunk::new(0, vec![], hash_bytes));
-        chunk_hashes.push(hash_bytes);
-    }
+    let reader = BufReader::with_capacity(256 * 1024, file);
 
     let file_name = file_path
         .file_name()
@@ -62,8 +35,40 @@ pub fn chunk_file(file_path: &PathBuf) -> Result<(Vec<Chunk>, FileMetadata)> {
         .unwrap_or("unknown")
         .to_string();
 
+    // Read all chunks first (still sequential I/O, but with larger buffer)
+    let mut raw_chunks: Vec<Vec<u8>> = Vec::new();
+    let mut buffer = vec![0u8; CHUNK_SIZE];
+    let mut reader = reader;
+
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        // Only clone the actual bytes read, not the full buffer
+        raw_chunks.push(buffer[..bytes_read].to_vec());
+    }
+
+    // Handle empty files
+    if raw_chunks.is_empty() {
+        raw_chunks.push(vec![]);
+    }
+
+    // Parallel hashing using rayon
+    let chunks: Vec<Chunk> = raw_chunks
+        .into_par_iter()
+        .enumerate()
+        .map(|(index, data)| {
+            let hash = blake3::hash(&data);
+            Chunk::new(index, data, hash.into())
+        })
+        .collect();
+
+    let chunk_hashes: Vec<[u8; 32]> = chunks.iter().map(|c| c.hash).collect();
+
     let metadata = FileMetadata {
-        file_name,
+        file_name: file_name.clone(),
         total_chunks: chunks.len(),
         file_size,
         chunk_hashes,
@@ -71,7 +76,7 @@ pub fn chunk_file(file_path: &PathBuf) -> Result<(Vec<Chunk>, FileMetadata)> {
 
     info!(
         "Chunked file '{}' into {} chunks ({} bytes)",
-        metadata.file_name,
+        file_name,
         chunks.len(),
         file_size
     );

@@ -5,7 +5,7 @@ use anyhow::Result;
 use dialoguer::Input;
 use libp2p::{PeerId, futures::StreamExt, mdns, request_response, swarm::SwarmEvent};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
@@ -22,7 +22,10 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     let mut swarm = setup_network().await?;
 
     let mut sync_state = SyncState::new();
-    let mut currently_writing: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut currently_writing: HashSet<String> = HashSet::new();
+    // paths that were modified/created/deleted as a result of incoming network activity
+    // we ignore watcher events for these to avoid loops
+    let mut recently_remote: HashSet<String> = HashSet::new();
 
     // Cache for chunked files on the serving side
     let mut cached_chunks: HashMap<String, (Vec<crate::storage::Chunk>, crate::storage::FileMetadata)> =
@@ -141,7 +144,9 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                         if let SyncMessage::Metadata { ref file_name, .. } = response {
                                             if !cached_chunks.contains_key(file_name) {
                                                 let file_path = sync_path_abs.join(file_name);
-                                                if let Ok((chunks, metadata)) = crate::storage::chunk_file(&file_path) {
+                                                if let Ok((chunks, mut metadata)) = crate::storage::chunk_file(&file_path) {
+                                                    // preserve the relative name (path) used by the sync protocol
+                                                    metadata.file_name = file_name.clone();
                                                     cached_chunks.insert(file_name.clone(), (chunks, metadata));
                                                 }
                                             }
@@ -172,7 +177,8 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                             // Fallback: load and chunk the file
                                             let file_path = sync_path_abs.join(&file_name);
                                             match crate::storage::chunk_file(&file_path) {
-                                                Ok((chunks, metadata)) => {
+                                                Ok((chunks, mut metadata)) => {
+                                                    metadata.file_name = file_name.clone();
                                                     cached_chunks.insert(file_name.clone(), (chunks.clone(), metadata));
                                                     if let Some(chunk) = chunks.get(chunk_index) {
                                                         SyncMessage::ChunkResponse {
@@ -206,6 +212,9 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                         // Clear cache for this file
                                         cached_chunks.remove(&file_name);
 
+                                        // mark as remote so watcher skips it
+                                        recently_remote.insert(file_name.clone());
+
                                         // Request metadata to check if we need to update
                                         swarm.behaviour_mut().rr.send_request(
                                             &peer,
@@ -218,6 +227,37 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                         ) {
                                             warn!("Failed to send TransferComplete response: {:?}", e);
                                         }
+                                    }
+
+                                    SyncMessage::DirectoryCreated { path } => {
+                                        info!("Peer requested directory create: {}", path);
+                                        let dir_path = sync_path_abs.join(&path);
+                                        if let Err(e) = fs::create_dir_all(&dir_path) {
+                                            warn!("Failed to create directory {}: {:?}", path, e);
+                                        } else {
+                                            recently_remote.insert(path.clone());
+                                        }
+
+                                        let _ = swarm.behaviour_mut().rr.send_response(
+                                            channel,
+                                            SyncMessage::TransferComplete,
+                                        );
+                                    }
+
+                                    SyncMessage::DirectoryDeleted { path } => {
+                                        info!("Peer requested directory delete: {}", path);
+                                        let dir_path = sync_path_abs.join(&path);
+                                        if dir_path.exists() {
+                                            if let Err(e) = fs::remove_dir_all(&dir_path) {
+                                                warn!("Failed to remove directory {}: {:?}", path, e);
+                                            } else {
+                                                recently_remote.insert(path.clone());
+                                            }
+                                        }
+                                        let _ = swarm.behaviour_mut().rr.send_response(
+                                            channel,
+                                            SyncMessage::TransferComplete,
+                                        );
                                     }
 
                                     _ => {
@@ -418,55 +458,96 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                 match file_event.kind {
                     EventKind::Create(_) | EventKind::Modify(_) => {
                         for path in file_event.paths {
+                            // compute relative path string for messaging and skip checks
+                            let rel = match path.strip_prefix(&sync_path_abs) {
+                                Ok(p) => p.to_string_lossy().to_string(),
+                                Err(_) => path.to_string_lossy().to_string(),
+                            };
+
+                            if recently_remote.remove(&rel) {
+                                // change originated from remote; ignore
+                                continue;
+                            }
+
+                            if path.is_dir() {
+                                info!("Directory created: {}", rel);
+                                for peer in &sync_state.connected_peers {
+                                    swarm.behaviour_mut().rr.send_request(
+                                        peer,
+                                        SyncMessage::DirectoryCreated { path: rel.clone() },
+                                    );
+                                }
+                                continue;
+                            }
+
                             if path.is_file() {
-                                if let Some(file_name) = path.file_name() {
-                                    let file_name_str = file_name.to_str().unwrap().to_string();
+                                // send the path relative to the sync root so nested files work
+                                let rel_path = rel.clone();
 
-                                    // Skip files we're currently writing
-                                    if currently_writing.contains(&file_name_str) {
-                                        continue;
-                                    }
+                                // Skip files we're currently writing
+                                if currently_writing.contains(&rel_path) {
+                                    continue;
+                                }
 
-                                    // Skip temporary files
-                                    if file_name_str.starts_with('.') || file_name_str.ends_with(".tmp") {
-                                        continue;
-                                    }
+                                // Skip temporary files
+                                if rel_path.starts_with('.') || rel_path.ends_with(".tmp") {
+                                    continue;
+                                }
 
-                                    info!("File changed: {}", file_name_str);
+                                info!("File changed: {}", rel_path);
 
-                                    // Invalidate cache for this file
-                                    cached_chunks.remove(&file_name_str);
+                                // Invalidate cache for this file
+                                cached_chunks.remove(&rel_path);
 
-                                    for peer in &sync_state.connected_peers {
-                                        swarm.behaviour_mut().rr.send_request(
-                                            peer,
-                                            SyncMessage::FileChanged {
-                                                file_name: file_name_str.clone(),
-                                            }
-                                        );
-                                    }
+                                for peer in &sync_state.connected_peers {
+                                    swarm.behaviour_mut().rr.send_request(
+                                        peer,
+                                        SyncMessage::FileChanged {
+                                            file_name: rel_path.clone(),
+                                        }
+                                    );
                                 }
                             }
                         }
                     }
-                    EventKind::Remove(_) => {
+                    EventKind::Remove(remove_kind) => {
                         for path in file_event.paths {
-                            if let Some(file_name) = path.file_name() {
-                                let file_name_str = file_name.to_str().unwrap().to_string();
+                            let rel = match path.strip_prefix(&sync_path_abs) {
+                                Ok(p) => p.to_string_lossy().to_string(),
+                                Err(_) => path.to_string_lossy().to_string(),
+                            };
 
-                                info!("File removed: {}", file_name_str);
+                            if recently_remote.remove(&rel) {
+                                continue;
+                            }
 
-                                // Remove from cache
-                                cached_chunks.remove(&file_name_str);
+                            match remove_kind {
+                                notify::event::RemoveKind::Folder => {
+                                    info!("Directory removed: {}", rel);
+                                    for peer in &sync_state.connected_peers {
+                                        swarm.behaviour_mut().rr.send_request(
+                                            peer,
+                                            SyncMessage::DirectoryDeleted { path: rel.clone() },
+                                        );
+                                    }
+                                }
+                                _ => {
+                                    // treat every non-folder removal as file removal; rel is already relative
+                                    let rel_path = rel.clone();
+                                    info!("File removed: {}", rel_path);
 
-                                // Notify peers about deletion
-                                for peer in &sync_state.connected_peers {
-                                    swarm.behaviour_mut().rr.send_request(
-                                        peer,
-                                        SyncMessage::FileDeleted {
-                                            file_name: file_name_str.clone(),
-                                        }
-                                    );
+                                    // Remove from cache
+                                    cached_chunks.remove(&rel_path);
+
+                                    // Notify peers about deletion
+                                    for peer in &sync_state.connected_peers {
+                                        swarm.behaviour_mut().rr.send_request(
+                                            peer,
+                                            SyncMessage::FileDeleted {
+                                                file_name: rel_path.clone(),
+                                            }
+                                        );
+                                    }
                                 }
                             }
                         }
