@@ -129,7 +129,6 @@ pub fn chunk_file(file_path: &PathBuf) -> Result<(Vec<Chunk>, FileMetadata)> {
     Ok((chunks, metadata))
 }
 
-/// Get list of files in a directory
 pub async fn get_file_list(sync_path: &PathBuf) -> Result<Vec<String>> {
     let mut files = Vec::new();
 
@@ -151,7 +150,6 @@ pub async fn get_file_list(sync_path: &PathBuf) -> Result<Vec<String>> {
     Ok(files)
 }
 
-/// Get metadata for a specific file
 pub async fn get_file_metadata(sync_path: &PathBuf, file_name: &str) -> Result<SyncMessage> {
     info!("Getting metadata for file: {}", file_name);
 
@@ -163,7 +161,6 @@ pub async fn get_file_metadata(sync_path: &PathBuf, file_name: &str) -> Result<S
         });
     }
 
-    // Security check: ensure file is within sync path (prevent path traversal)
     let canonical = fs::canonicalize(&file_path)?;
     if !canonical.starts_with(sync_path) {
         warn!("Path traversal attempt detected: {}", file_name);
@@ -216,7 +213,6 @@ pub async fn process_received_chunk(
         .and_then(|m| m.chunk_hashes.get(chunk_index))
         .copied();
 
-    // Verify chunk hash
     if let Some(expected) = expected_hash {
         if !verify_chunk(&data, &expected) {
             error!("Chunk {} failed hash verification", chunk_index);
@@ -230,13 +226,10 @@ pub async fn process_received_chunk(
         );
     }
 
-    // Remove from failed set if it was there (retry succeeded)
     transfer_state.failed_chunks.remove(&chunk_index);
 
-    // Store the chunk
     transfer_state.received_chunks.insert(chunk_index, data);
 
-    // Check if transfer is complete
     if let Some(metadata) = &transfer_state.metadata {
         if transfer_state.received_chunks.len() == metadata.total_chunks {
             reassemble_file(transfer_state)?;
@@ -248,7 +241,6 @@ pub async fn process_received_chunk(
     Ok(false)
 }
 
-/// Reassemble file from received chunks
 fn reassemble_file(transfer_state: &FileTransferState) -> Result<()> {
     let metadata = transfer_state
         .metadata

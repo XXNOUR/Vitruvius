@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 const MAX_CONCURRENT_FILES: usize = 3;
-const MAX_CONCURRENT_CHUNKS: usize = 8; // Max chunks in-flight per file
+const MAX_CONCURRENT_CHUNKS: usize = 8;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -359,7 +359,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                                 }
                                                             }
                                                         } else {
-                                                            // Request next chunk (pipeline style)
                                                             let next_chunk_index = transfer_needed.next_chunk_to_request;
                                                             if next_chunk_index < total_chunks && transfer_needed.chunks_in_flight < MAX_CONCURRENT_CHUNKS {
                                                                 transfer_needed.next_chunk_to_request += 1;

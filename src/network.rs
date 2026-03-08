@@ -55,7 +55,6 @@ pub enum SyncMessage {
     },
 }
 
-/// Manages concurrent file transfers with proper tracking
 pub struct SyncSession {
     pub pending_files: Vec<String>,
     pub active_transfers: HashSet<String>,
@@ -78,7 +77,6 @@ impl SyncSession {
         self.active_transfers.len() < self.max_concurrent && !self.pending_files.is_empty()
     }
 
-    /// Start the next file transfer, properly tracking it as active
     pub fn start_next(&mut self) -> Option<String> {
         if !self.can_start_more() {
             return None;
@@ -92,23 +90,19 @@ impl SyncSession {
         }
     }
 
-    /// Mark a file transfer as complete
     pub fn mark_complete(&mut self, file_name: &str) {
         self.active_transfers.remove(file_name);
         self.completed_files.insert(file_name.to_string());
     }
 
-    /// Check if all transfers are done
     pub fn is_done(&self) -> bool {
         self.pending_files.is_empty() && self.active_transfers.is_empty()
     }
 
-    /// Get count of remaining files
     pub fn remaining(&self) -> usize {
         self.pending_files.len() + self.active_transfers.len()
     }
 
-    /// Get count of completed files
     pub fn completed(&self) -> usize {
         self.completed_files.len()
     }
