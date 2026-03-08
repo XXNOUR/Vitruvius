@@ -6,9 +6,11 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::network::SyncMessage;
+
+const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Chunk {
@@ -18,7 +20,7 @@ pub struct Chunk {
 }
 
 impl Chunk {
-    fn new(index: usize, data: Vec<u8>, hash: [u8; 32]) -> Self {
+    pub fn new(index: usize, data: Vec<u8>, hash: [u8; 32]) -> Self {
         Chunk { index, data, hash }
     }
 }
@@ -31,10 +33,19 @@ pub struct FileMetadata {
     pub chunk_hashes: Vec<[u8; 32]>,
 }
 
+/// Tracks the state of an incoming file transfer
 pub struct FileTransferState {
     pub metadata: Option<FileMetadata>,
     pub received_chunks: HashMap<usize, Vec<u8>>,
     pub file_path: PathBuf,
+    /// Next chunk index to request (for pipelining)
+    pub next_chunk_to_request: usize,
+    /// Number of chunks currently in-flight
+    pub chunks_in_flight: usize,
+    /// Total chunks expected
+    pub chunks_expected: usize,
+    /// Track which chunks failed verification for retry
+    pub failed_chunks: HashSet<usize>,
 }
 
 impl FileTransferState {
@@ -43,13 +54,27 @@ impl FileTransferState {
             metadata: None,
             received_chunks: HashMap::new(),
             file_path,
+            next_chunk_to_request: 0,
+            chunks_in_flight: 0,
+            chunks_expected: 0,
+            failed_chunks: HashSet::new(),
         }
+    }
+
+    /// Calculate progress percentage
+    pub fn progress_percent(&self) -> f32 {
+        if self.chunks_expected == 0 {
+            return 0.0;
+        }
+        (self.received_chunks.len() as f32 / self.chunks_expected as f32) * 100.0
     }
 }
 
-pub fn chunk_file(file_path: &PathBuf) -> Result<(Vec<Chunk>, FileMetadata)> {
-    const CHUNK_SIZE: usize = 1024 * 1024;
+// Need to import HashSet
+use std::collections::HashSet;
 
+/// Chunk a file into smaller pieces with hashes
+pub fn chunk_file(file_path: &PathBuf) -> Result<(Vec<Chunk>, FileMetadata)> {
     let file = File::open(file_path)?;
     let file_size = file.metadata()?.len();
     let mut reader = BufReader::new(file);
@@ -74,7 +99,19 @@ pub fn chunk_file(file_path: &PathBuf) -> Result<(Vec<Chunk>, FileMetadata)> {
         index += 1;
     }
 
-    let file_name = file_path.file_name().unwrap().to_str().unwrap().to_string();
+    // Handle empty files
+    if chunks.is_empty() {
+        let hash = blake3::hash(&[]);
+        let hash_bytes = hash.into();
+        chunks.push(Chunk::new(0, vec![], hash_bytes));
+        chunk_hashes.push(hash_bytes);
+    }
+
+    let file_name = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
 
     let metadata = FileMetadata {
         file_name,
@@ -83,10 +120,16 @@ pub fn chunk_file(file_path: &PathBuf) -> Result<(Vec<Chunk>, FileMetadata)> {
         chunk_hashes,
     };
 
-    info!("Chunked file into {} chunks", chunks.len());
+    info!(
+        "Chunked file '{}' into {} chunks ({} bytes)",
+        metadata.file_name,
+        chunks.len(),
+        file_size
+    );
     Ok((chunks, metadata))
 }
 
+/// Get list of files in a directory
 pub async fn get_file_list(sync_path: &PathBuf) -> Result<Vec<String>> {
     let mut files = Vec::new();
 
@@ -94,8 +137,11 @@ pub async fn get_file_list(sync_path: &PathBuf) -> Result<Vec<String>> {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file() {
-                if let Some(name) = path.file_name() {
-                    files.push(name.to_str().unwrap().to_string());
+                // Skip hidden files and temporary files
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if !name.starts_with('.') && !name.ends_with(".tmp") {
+                        files.push(name.to_string());
+                    }
                 }
             }
         }
@@ -105,6 +151,7 @@ pub async fn get_file_list(sync_path: &PathBuf) -> Result<Vec<String>> {
     Ok(files)
 }
 
+/// Get metadata for a specific file
 pub async fn get_file_metadata(sync_path: &PathBuf, file_name: &str) -> Result<SyncMessage> {
     info!("Getting metadata for file: {}", file_name);
 
@@ -113,6 +160,15 @@ pub async fn get_file_metadata(sync_path: &PathBuf, file_name: &str) -> Result<S
     if !file_path.exists() || !file_path.is_file() {
         return Ok(SyncMessage::Error {
             message: format!("File '{}' not found", file_name),
+        });
+    }
+
+    // Security check: ensure file is within sync path (prevent path traversal)
+    let canonical = fs::canonicalize(&file_path)?;
+    if !canonical.starts_with(sync_path) {
+        warn!("Path traversal attempt detected: {}", file_name);
+        return Ok(SyncMessage::Error {
+            message: "Invalid file path".to_string(),
         });
     }
 
@@ -126,42 +182,14 @@ pub async fn get_file_metadata(sync_path: &PathBuf, file_name: &str) -> Result<S
     })
 }
 
-pub async fn get_chunk(
-    sync_path: &PathBuf,
-    file_name: &str,
-    chunk_index: usize,
-) -> Result<SyncMessage> {
-    info!("Getting chunk {} for file: {}", chunk_index, file_name);
-
-    let file_path = sync_path.join(file_name);
-
-    if !file_path.exists() {
-        return Ok(SyncMessage::Error {
-            message: format!("File '{}' not found", file_name),
-        });
-    }
-
-    let (chunks, _) = chunk_file(&file_path)?;
-
-    if let Some(chunk) = chunks.get(chunk_index) {
-        Ok(SyncMessage::ChunkResponse {
-            chunk_index: chunk.index,
-            data: chunk.data.clone(),
-            hash: chunk.hash,
-            file_name: file_name.into(),
-        })
-    } else {
-        Ok(SyncMessage::Error {
-            message: format!("Chunk {} out of range", chunk_index),
-        })
-    }
-}
-
+/// Verify chunk integrity using Blake3 hash
 pub fn verify_chunk(data: &[u8], expected_hash: &[u8; 32]) -> bool {
     let computed_hash = blake3::hash(data);
     computed_hash.as_bytes() == expected_hash
 }
 
+/// Process a received chunk
+/// Returns Ok(true) if file transfer is complete, Ok(false) if more chunks needed
 pub async fn process_received_chunk(
     peer_id: PeerId,
     chunk_index: usize,
@@ -169,15 +197,46 @@ pub async fn process_received_chunk(
     hash: [u8; 32],
     transfer_state: &mut FileTransferState,
 ) -> Result<bool> {
-    info!("Processing chunk {} from {}", chunk_index, peer_id);
+    info!(
+        "Processing chunk {} from {} (file progress: {:.1}%)",
+        chunk_index,
+        peer_id,
+        transfer_state.progress_percent()
+    );
 
-    if !verify_chunk(&data, &hash) {
-        error!("Chunk {} failed verification", chunk_index);
-        return Ok(false);
+    // Decrement in-flight count
+    if transfer_state.chunks_in_flight > 0 {
+        transfer_state.chunks_in_flight -= 1;
     }
 
+    // Get expected hash from metadata
+    let expected_hash = transfer_state
+        .metadata
+        .as_ref()
+        .and_then(|m| m.chunk_hashes.get(chunk_index))
+        .copied();
+
+    // Verify chunk hash
+    if let Some(expected) = expected_hash {
+        if !verify_chunk(&data, &expected) {
+            error!("Chunk {} failed hash verification", chunk_index);
+            transfer_state.failed_chunks.insert(chunk_index);
+            return Ok(false);
+        }
+    } else {
+        warn!(
+            "No expected hash for chunk {}, accepting anyway",
+            chunk_index
+        );
+    }
+
+    // Remove from failed set if it was there (retry succeeded)
+    transfer_state.failed_chunks.remove(&chunk_index);
+
+    // Store the chunk
     transfer_state.received_chunks.insert(chunk_index, data);
 
+    // Check if transfer is complete
     if let Some(metadata) = &transfer_state.metadata {
         if transfer_state.received_chunks.len() == metadata.total_chunks {
             reassemble_file(transfer_state)?;
@@ -189,24 +248,56 @@ pub async fn process_received_chunk(
     Ok(false)
 }
 
+/// Reassemble file from received chunks
 fn reassemble_file(transfer_state: &FileTransferState) -> Result<()> {
     let metadata = transfer_state
         .metadata
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("No metadata available"))?;
 
+    // Write to temporary file first, then rename (atomic write)
     let output_path = transfer_state.file_path.join(&metadata.file_name);
-    let mut file = File::create(&output_path)?;
+    let temp_path = output_path.with_extension("tmp");
 
-    for i in 0..metadata.total_chunks {
-        if let Some(chunk_data) = transfer_state.received_chunks.get(&i) {
-            file.write_all(chunk_data)?;
-        } else {
-            return Err(anyhow::anyhow!("Missing chunk {}", i));
+    {
+        let mut file = File::create(&temp_path)?;
+
+        for i in 0..metadata.total_chunks {
+            if let Some(chunk_data) = transfer_state.received_chunks.get(&i) {
+                file.write_all(chunk_data)?;
+            } else {
+                return Err(anyhow::anyhow!("Missing chunk {}", i));
+            }
         }
+
+        file.sync_all()?;
     }
 
-    file.sync_all()?;
+    // Atomic rename
+    fs::rename(&temp_path, &output_path)?;
     info!("File reassembled: {:?}", output_path);
+
+    Ok(())
+}
+
+/// Delete a file from the sync directory
+pub fn delete_file(sync_path: &PathBuf, file_name: &str) -> Result<()> {
+    let file_path = sync_path.join(file_name);
+
+    // Security check: ensure file is within sync path
+    if file_path.exists() {
+        let canonical = fs::canonicalize(&file_path)?;
+        if !canonical.starts_with(sync_path) {
+            warn!(
+                "Path traversal attempt detected during delete: {}",
+                file_name
+            );
+            return Err(anyhow::anyhow!("Invalid file path"));
+        }
+
+        fs::remove_file(&file_path)?;
+        info!("Deleted file: {}", file_name);
+    }
+
     Ok(())
 }

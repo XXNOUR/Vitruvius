@@ -7,8 +7,6 @@ use std::{
     time::Duration,
 };
 
-use crate::storage::FileTransferState;
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SyncMessage {
     MetaDataRequest {
@@ -44,6 +42,10 @@ pub enum SyncMessage {
         file_name: String,
     },
 
+    FileDeleted {
+        file_name: String,
+    },
+
     TransferComplete,
 
     Empty,
@@ -52,40 +54,63 @@ pub enum SyncMessage {
         message: String,
     },
 }
+
+/// Manages concurrent file transfers with proper tracking
 pub struct SyncSession {
-    pub pending_file: Vec<String>,
-    pub active_transfers: HashMap<String, FileTransferState>,
+    pub pending_files: Vec<String>,
+    pub active_transfers: HashSet<String>,
     pub completed_files: HashSet<String>,
-    pub max_conc: usize,
+    pub max_concurrent: usize,
 }
 
 impl SyncSession {
     pub fn new(file_list: Vec<String>, max: usize) -> Self {
         SyncSession {
-            pending_file: file_list,
-            active_transfers: HashMap::new(),
+            pending_files: file_list,
+            active_transfers: HashSet::new(),
             completed_files: HashSet::new(),
-            max_conc: max,
+            max_concurrent: max,
         }
     }
 
+    /// Check if we can start more file transfers
     pub fn can_start_more(&self) -> bool {
-        self.active_transfers.len() < self.max_conc && !self.pending_file.is_empty()
+        self.active_transfers.len() < self.max_concurrent && !self.pending_files.is_empty()
     }
 
+    /// Start the next file transfer, properly tracking it as active
     pub fn start_next(&mut self) -> Option<String> {
-        if self.can_start_more() {
-            self.pending_file.pop()
+        if !self.can_start_more() {
+            return None;
+        }
+
+        if let Some(file_name) = self.pending_files.pop() {
+            self.active_transfers.insert(file_name.clone());
+            Some(file_name)
         } else {
             None
         }
     }
+
+    /// Mark a file transfer as complete
     pub fn mark_complete(&mut self, file_name: &str) {
         self.active_transfers.remove(file_name);
         self.completed_files.insert(file_name.to_string());
     }
+
+    /// Check if all transfers are done
     pub fn is_done(&self) -> bool {
-        self.pending_file.is_empty() && self.active_transfers.is_empty()
+        self.pending_files.is_empty() && self.active_transfers.is_empty()
+    }
+
+    /// Get count of remaining files
+    pub fn remaining(&self) -> usize {
+        self.pending_files.len() + self.active_transfers.len()
+    }
+
+    /// Get count of completed files
+    pub fn completed(&self) -> usize {
+        self.completed_files.len()
     }
 }
 
@@ -113,8 +138,9 @@ pub async fn setup_network() -> Result<Swarm<MyBehaviour>> {
                 mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?;
             let mut config = request_response::Config::default();
 
+            // Increase timeout for larger file transfers
             #[allow(deprecated)]
-            config.set_request_timeout(Duration::from_secs(10));
+            config.set_request_timeout(Duration::from_secs(60));
 
             let rr = libp2p::request_response::cbor::Behaviour::<SyncMessage, SyncMessage>::new(
                 [(
@@ -125,7 +151,7 @@ pub async fn setup_network() -> Result<Swarm<MyBehaviour>> {
             );
             Ok(MyBehaviour { mdns, rr })
         })?
-        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(30)))
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
