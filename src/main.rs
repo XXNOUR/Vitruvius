@@ -7,6 +7,7 @@ use crate::storage::FileTransferState;
 use anyhow::Result;
 use dialoguer::Input;
 use libp2p::{PeerId, futures::StreamExt, mdns, request_response, swarm::SwarmEvent};
+use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
@@ -23,7 +24,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut current_session: Option<SyncSession> = None;
 
-    // let mut currently_writing: HashSet<String> = HashSet::new();
+    let mut is_initial_sync_complete = false;
+
+    let mut currently_writing: HashSet<String> = HashSet::new();
 
     let target_id_str: String = Input::new()
         .with_prompt("Enter Peer ID to sync with (or leave empty to wait)")
@@ -47,15 +50,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         info!("Waiting for incoming connections...");
     }
 
-    // let (file_tx, mut file_rx) = mpsc::channel::<Event>(100);
+    let (file_tx, mut file_rx) = mpsc::channel::<Event>(100);
 
-    // let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
-    //     if let Ok(event) = res {
-    //         let _ = file_tx.blocking_send(event);
-    //     }
-    // })?;
+    let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
+        if let Ok(event) = res {
+            let _ = file_tx.blocking_send(event);
+        }
+    })?;
 
-    // watcher.watch(&sync_path_abs, RecursiveMode::Recursive)?;
+    watcher.watch(&sync_path_abs, RecursiveMode::Recursive)?;
     info!("Watching folder for changes");
 
     let mut transfer_states: HashMap<String, FileTransferState> = HashMap::new();
@@ -106,6 +109,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             info!("Peer requested file list");
 
                                             let file_names = crate::storage::get_file_list(&sync_path_abs).await?;
+
 
                                             let _ = swarm.behaviour_mut().rr.send_response(
                                                 channel,
@@ -161,6 +165,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             info!("Creating a new Sync Session with all the files");
 
             let mut sync_session: SyncSession = SyncSession::new(file_names, 3); // max 3 concurrent
+            is_initial_sync_complete = false;
 
             while sync_session.can_start_more() {
                 if let Some(file_name) = sync_session.start_next() {
@@ -248,6 +253,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                                         if session.is_done() {
                                                                             info!("All files synchrised Successfully");
                                                                             current_session = None;
+                                                                            is_initial_sync_complete = true;
                                                                         }
 
 
@@ -289,34 +295,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                // Some(file_event) = file_rx.recv() => {
-                    // match file_event.kind {
-                        // EventKind::Create(_) | EventKind::Modify(_) => {
-                            // for path in file_event.paths {
-                                // if path.is_file() {
-                                    // if let Some(file_name) = path.file_name() {
-                                        // let file_name_str = file_name.to_str().unwrap().to_string();
+                Some(file_event) = file_rx.recv() => {
+                    if !is_initial_sync_complete {
+                        continue;
+                    }
+                 match file_event.kind {
+                  EventKind::Create(_) | EventKind::Modify(_) => {
+                      for path in file_event.paths {
+                          if path.is_file() {
+                              if let Some(file_name) = path.file_name() {
+                                  let file_name_str = file_name.to_str().unwrap().to_string();
 
-                                        // if currently_writing.contains(&file_name_str) {
-                                            // continue;
-                                        // }
-                                        // info!("File changed: {}", file_name_str);
+                                  if currently_writing.contains(&file_name_str) {
+                                      continue;
+                                  }
+                                  info!("File changed: {}", file_name_str);
 
-                                        // for peer in &connected_peers {
-                                            // swarm.behaviour_mut().rr.send_request(
-                                                // peer,
-                                                // SyncMessage::FileChanged {
-                                                    // file_name: file_name_str.clone()
-                                                // }
-                                            // );
-                                        // }
-                                    // }
-                                // }
-                            // }
-                        // }
-                        // _ => {}
-                    // }
-                // }
+                                  for peer in &connected_peers {
+                                      swarm.behaviour_mut().rr.send_request(
+                                          peer,
+                                          SyncMessage::FileChanged {
+                                              file_name: file_name_str.clone()
+                                          }
+                                      );
+                                  }
+                              }
+                          }
+                      }
+                  }
+                  _ => {}
+                 }
+                }
 
                 _ = tokio::signal::ctrl_c() => {
                     info!("Shutting down...");
