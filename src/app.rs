@@ -260,6 +260,26 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                         );
                                     }
 
+                                    SyncMessage::FileDeleted { file_name } => {
+                                        info!("Peer requested file delete: {}", file_name);
+                                        let file_path = sync_path_abs.join(&file_name);
+                                        if file_path.exists() {
+                                            if let Err(e) = fs::remove_file(&file_path) {
+                                                warn!("Failed to remove file {}: {:?}", file_name, e);
+                                            } else {
+                                                recently_remote.insert(file_name.clone());
+                                            }
+                                        }
+
+                                        // Clear from cache
+                                        cached_chunks.remove(&file_name);
+
+                                        let _ = swarm.behaviour_mut().rr.send_response(
+                                            channel,
+                                            SyncMessage::TransferComplete,
+                                        );
+                                    }
+
                                     _ => {
                                         warn!("Unexpected request type from {}", peer);
                                         let _ = swarm.behaviour_mut().rr.send_response(
