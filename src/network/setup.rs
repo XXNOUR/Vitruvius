@@ -22,9 +22,9 @@ pub async fn setup_network() -> Result<Swarm<MyBehaviour>> {
                 mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?;
             let mut config = request_response::Config::default();
 
-            // Increase timeout for larger file transfers
+            // Timeout for large file transfers (30 minutes for very large files)
             #[allow(deprecated)]
-            config.set_request_timeout(Duration::from_secs(60));
+            config.set_request_timeout(Duration::from_secs(1800));
 
             let rr = libp2p::request_response::cbor::Behaviour::<SyncMessage, SyncMessage>::new(
                 [(
@@ -35,7 +35,10 @@ pub async fn setup_network() -> Result<Swarm<MyBehaviour>> {
             );
             Ok(MyBehaviour { mdns, rr })
         })?
-        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+        // CRITICAL: Keep connections alive indefinitely for real-time sync
+        // File changes can happen at any time, so we need persistent connections
+        // This allows immediate file change notifications without reconnect overhead
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(u64::MAX)))
         .build();
 
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
