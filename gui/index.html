@@ -1,0 +1,1549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vitruvius — Delta Sync Network</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;400;600;700;900&family=Barlow:wght@300;400&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:      #0a0e14;
+  --bg2:     #0f1419;
+  --bg3:     #131a24;
+  --panel:   #0f161e;
+  --border:  #1a2839;
+  --border2: #2a3a52;
+  --accent:  #00d9ff;
+  --accent2: #0088ff;
+  --success: #00ff7f;
+  --warning: #ffa500;
+  --error:   #ff3366;
+  --text:    #e0e8f8;
+  --text2:   #7a9acc;
+  --text3:   #4a5f7f;
+  --mono:    'Share Tech Mono', monospace;
+  --sans:    'Barlow Condensed', sans-serif;
+  --body:    'Barlow', sans-serif;
+  --glow:    0 0 20px rgba(0, 217, 255, 0.3);
+}
+
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--body);font-size:13px;overflow:hidden}
+
+/* Animated grid background */
+body::before{
+  content:'';position:fixed;inset:0;
+  background-image:
+    linear-gradient(rgba(0,217,255,.015) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(0,217,255,.015) 1px,transparent 1px);
+  background-size:50px 50px;pointer-events:none;z-index:0
+}
+body::after{
+  content:'';position:fixed;inset:0;
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.08) 2px,rgba(0,0,0,.08) 4px);
+  pointer-events:none;z-index:9998
+}
+
+.app{
+  position:relative;z-index:1;
+  height:100vh;
+  display:grid;
+  grid-template-rows:60px 1fr 140px;
+  grid-template-columns:280px 1fr 320px;
+  gap:1px;background:var(--border)
+}
+
+/* ──────────── HEADER ──────────────────────── */
+header{
+  grid-column:1/-1;
+  background:var(--bg2);
+  display:flex;align-items:center;padding:0 20px;gap:16px;
+  border-bottom:1px solid var(--border2);overflow:hidden;position:relative
+}
+header::after{
+  content:'';position:absolute;bottom:0;left:-100%;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,var(--accent),transparent);
+  animation:hline 6s linear infinite
+}
+@keyframes hline{to{left:100%}}
+
+.logo{
+  font-family:var(--sans);font-weight:900;font-size:22px;
+  letter-spacing:.25em;color:var(--accent);text-transform:uppercase;
+  text-shadow:var(--glow);
+  display:flex;align-items:center;gap:10px;flex-shrink:0
+}
+.logo-icon{
+  width:24px;height:24px;border:2px solid var(--accent);
+  transform:rotate(45deg);position:relative;flex-shrink:0;
+  box-shadow:var(--glow);
+}
+.logo-icon::after{
+  content:'';position:absolute;inset:4px;background:var(--accent);opacity:.2;
+}
+.vsep{width:1px;height:30px;background:var(--border2);flex-shrink:0}
+
+.node-status{
+  font-family:var(--mono);font-size:11px;color:var(--text2);
+  background:var(--bg3);border:1px solid var(--border);
+  padding:5px 12px;border-radius:4px;cursor:pointer;transition:all .2s;
+  display:flex;align-items:center;gap:8px;position:relative;
+  flex-shrink:0
+}
+.node-status:hover{border-color:var(--accent);color:var(--accent);box-shadow:inset var(--glow)}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--text3);flex-shrink:0;transition:all .3s}
+.status-dot.online{background:var(--success);box-shadow:0 0 10px var(--success);animation:pulse 2s ease-in-out infinite}
+.status-dot.syncing{background:var(--accent);animation:pulse 1s ease-in-out infinite}
+.status-dot.offline{background:var(--error)}
+@keyframes pulse{50%{opacity:.4;transform:scale(0.8)}}
+
+.h-status-text{font-weight:600}
+.spacer{flex:1}
+
+.h-stats{display:flex;gap:20px;align-items:center}
+.hstat{display:flex;flex-direction:column;align-items:flex-end;gap:2px}
+.hstat-label{font-family:var(--mono);font-size:8px;color:var(--text3);text-transform:uppercase;letter-spacing:.1em}
+.hstat-value{font-family:var(--mono);font-size:13px;color:var(--text);font-weight:600}
+.hstat-value.success{color:var(--success)}.hstat-value.accent{color:var(--accent)}
+
+.btn{
+  font-family:var(--sans);font-weight:600;font-size:11px;letter-spacing:.1em;
+  text-transform:uppercase;border:1px solid;padding:6px 14px;cursor:pointer;
+  background:transparent;transition:all .15s;flex-shrink:0;white-space:nowrap;
+  border-radius:3px;
+}
+.btn-accent{border-color:var(--accent2);color:var(--accent)}
+.btn-accent:hover{background:var(--accent2);color:#000;box-shadow:0 0 15px rgba(0,136,255,.5)}
+.btn-success{border-color:var(--success);color:var(--success)}
+.btn-success:hover{background:var(--success);color:var(--bg);box-shadow:0 0 15px rgba(0,255,127,.4)}
+.btn-error{border-color:var(--error);color:var(--error)}
+.btn-error:hover{background:var(--error);color:#fff;box-shadow:0 0 15px rgba(255,51,102,.4)}
+.btn-neutral{border-color:var(--border2);color:var(--text2)}
+.btn-neutral:hover{border-color:var(--text2);color:var(--text);background:rgba(255,255,255,.03)}
+.btn:disabled{opacity:.3;cursor:not-allowed}
+.btn.sm{padding:4px 10px;font-size:10px}
+
+/* ──────────── PANEL BASE ──────────────────── */
+.panel{background:var(--panel);display:flex;flex-direction:column;overflow:hidden;border-right:1px solid var(--border)}
+.panel:last-child{border-right:none}
+
+.ph{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 14px;background:var(--bg3);border-bottom:1px solid var(--border);flex-shrink:0;
+}
+.ph-title{font-family:var(--sans);font-weight:700;font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--text);flex:1}
+.ph-badge{
+  font-family:var(--mono);font-size:10px;background:rgba(0,217,255,.1);
+  border:1px solid var(--border2);padding:2px 8px;color:var(--accent);border-radius:3px;
+}
+
+.pscroll{flex:1;overflow-y:auto;padding:10px}
+.pscroll::-webkit-scrollbar{width:4px}
+.pscroll::-webkit-scrollbar-track{background:transparent}
+.pscroll::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
+.pscroll::-webkit-scrollbar-thumb:hover{background:var(--border)}
+
+/* ──────────── LEFT: PEERS ─────────────────── */
+.peers-panel{grid-row:2;grid-column:1}
+
+.cform{padding:10px;border-bottom:1px solid var(--border);flex-shrink:0;display:flex;flex-direction:column;gap:8px}
+.form-group{display:flex;flex-direction:column;gap:4px}
+.form-label{font-family:var(--mono);font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.1em;font-weight:600}
+.form-row{display:flex;gap:6px}
+input[type=text],input[type=number]{
+  background:var(--bg);border:1px solid var(--border2);color:var(--text);
+  font-family:var(--mono);font-size:10px;padding:6px 8px;outline:none;
+  transition:all .15s;width:100%;border-radius:3px
+}
+input[type=text]:focus,input[type=number]:focus{border-color:var(--accent);box-shadow:inset 0 0 8px rgba(0,217,255,.1)}
+input::placeholder{color:var(--text3)}
+
+.disc-indicator{
+  display:flex;align-items:center;gap:8px;
+  padding:8px 10px;background:var(--bg);border-bottom:1px solid var(--border);flex-shrink:0
+}
+.disc-dots{display:flex;gap:3px}
+.disc-dots span{
+  display:inline-block;width:5px;height:5px;border-radius:50%;
+  background:var(--accent);animation:dots 1.4s ease infinite
+}
+.disc-dots span:nth-child(2){animation-delay:.2s}
+.disc-dots span:nth-child(3){animation-delay:.4s}
+@keyframes dots{0%,80%,100%{opacity:.2;transform:scale(.8)}40%{opacity:1;transform:scale(1)}}
+.disc-text{font-family:var(--mono);font-size:9px;color:var(--text3)}
+
+.peer-card{
+  border:1px solid var(--border);margin-bottom:6px;
+  background:var(--bg2);position:relative;overflow:hidden;cursor:pointer;
+  transition:all .2s;border-radius:4px;
+}
+.peer-card::before{
+  content:'';position:absolute;left:0;top:0;bottom:0;width:3px;
+  background:var(--border);transition:background .3s
+}
+.peer-card.connected::before{background:var(--success)}
+.peer-card.syncing::before{background:var(--accent);animation:blk 1s step-end infinite}
+.peer-card.discovered::before{background:var(--warning)}
+.peer-card.error::before{background:var(--error)}
+.peer-card:hover{border-color:var(--border);background:rgba(0,217,255,.02)}
+@keyframes blk{50%{opacity:.5}}
+
+.pc-content{padding:9px 10px 9px 12px}
+.pc-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.pc-name{font-family:var(--sans);font-weight:600;font-size:12px;color:var(--text)}
+.pc-tag{
+  font-family:var(--mono);font-size:8px;padding:2px 6px;border:1px solid;
+  text-transform:uppercase;letter-spacing:.08em;border-radius:2px;
+}
+.tag-connected{border-color:var(--success);color:var(--success)}
+.tag-syncing{border-color:var(--accent);color:var(--accent)}
+.tag-discovered{border-color:var(--warning);color:var(--warning)}
+.tag-error{border-color:var(--error);color:var(--error)}
+
+.pc-peerId{
+  font-family:var(--mono);font-size:8px;color:var(--text3);
+  margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.pc-stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid var(--border)}
+.pcstat{display:flex;flex-direction:column;gap:1px}
+.pcstat-label{font-family:var(--mono);font-size:7px;color:var(--text3);text-transform:uppercase}
+.pcstat-value{font-family:var(--mono);font-size:10px;color:var(--text2);font-weight:600}
+
+.pc-actions{display:flex;gap:4px;padding:6px;border-top:1px solid var(--border);background:rgba(0,0,0,.2)}
+
+.empty-state{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:30px 15px;gap:10px;color:var(--text3);font-family:var(--mono);font-size:9px;text-align:center;
+}
+.empty-icon{width:36px;height:36px;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:18px;border-radius:4px;opacity:.5}
+
+/* ──────────── CENTER: MAIN AREA ───────────── */
+.main-panel{grid-row:2;grid-column:2;display:flex;flex-direction:column}
+
+.tabs{display:flex;background:var(--bg);border-bottom:1px solid var(--border);flex-shrink:0}
+.tab{
+  font-family:var(--sans);font-weight:700;font-size:10px;letter-spacing:.15em;
+  text-transform:uppercase;padding:12px 18px;color:var(--text3);cursor:pointer;
+  border-right:1px solid var(--border);border-bottom:2px solid transparent;transition:all .15s;
+  position:relative;
+}
+.tab:hover{color:var(--text2)}
+.tab.active{
+  color:var(--accent);border-bottom-color:var(--accent);background:var(--panel);
+}
+.tab.active::after{
+  content:'';position:absolute;top:0;right:0;bottom:0;left:0;
+  background:linear-gradient(180deg,rgba(0,217,255,.08),transparent);pointer-events:none;
+}
+
+.tab-content{display:none;flex:1;flex-direction:column;overflow:hidden;position:relative}
+.tab-content.active{display:flex}
+
+/* Transfer card */
+.transfer-card{
+  margin:12px;background:var(--bg2);border:1px solid var(--border2);
+  border-radius:4px;flex-shrink:0;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.3);
+}
+.tc-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:12px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,rgba(0,217,255,.05),transparent);
+}
+.tc-filename{
+  font-family:var(--sans);font-weight:600;font-size:14px;color:var(--text);
+  display:flex;align-items:center;gap:8px;
+}
+.tc-ext{font-family:var(--mono);font-size:9px;background:var(--accent2);color:#fff;padding:2px 6px;border-radius:2px;text-transform:uppercase}
+.tc-peer{font-family:var(--mono);font-size:9px;color:var(--text3)}
+
+.tc-body{padding:14px}
+.tc-progress{margin-bottom:12px}
+.prog-header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}
+.prog-percent{font-family:var(--mono);font-size:28px;color:var(--accent);font-weight:bold;line-height:1}
+.prog-frac{font-family:var(--mono);font-size:10px;color:var(--text2)}
+.prog-bar-container{
+  height:6px;background:var(--bg);border:1px solid var(--border2);
+  position:relative;overflow:hidden;border-radius:3px;
+}
+.prog-bar-fill{
+  height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent));
+  transition:width .3s ease;position:relative;box-shadow:0 0 10px rgba(0,217,255,.4);
+}
+.prog-bar-fill::after{
+  content:'';position:absolute;right:0;top:0;bottom:0;width:2px;
+  background:#fff;box-shadow:0 0 8px var(--accent)
+}
+
+/* Chunk visualization */
+.chunk-grid{
+  display:flex;flex-wrap:wrap;gap:2px;margin:12px 0;
+  padding:10px;background:rgba(0,0,0,.2);border-radius:3px;
+  max-height:80px;overflow-y:auto;
+}
+.chunk{width:10px;height:10px;background:var(--border);transition:all .15s;flex-shrink:0;border-radius:1px}
+.chunk.done{background:var(--accent);box-shadow:0 0 4px rgba(0,217,255,.5)}
+.chunk.fail{background:var(--error);box-shadow:0 0 4px rgba(255,51,102,.4)}
+.chunk.active{background:var(--accent2);animation:ck-active .6s ease infinite}
+@keyframes ck-active{0%,100%{opacity:1}50%{opacity:.3}}
+
+.transfer-stats{
+  display:grid;grid-template-columns:repeat(4,1fr);
+  gap:1px;background:var(--border);margin-top:12px;border-radius:3px;overflow:hidden;
+}
+.tstat{background:var(--bg);padding:8px;display:flex;flex-direction:column;gap:2px}
+.tstat-label{font-family:var(--mono);font-size:7px;color:var(--text3);text-transform:uppercase;letter-spacing:.1em}
+.tstat-value{font-family:var(--mono);font-size:12px;color:var(--text);font-weight:600}
+.tstat-value.accent{color:var(--accent)}.tstat-value.success{color:var(--success)}
+
+/* Queue / Files */
+.queue-item{
+  display:flex;align-items:center;gap:10px;padding:8px;
+  border:1px solid var(--border);margin-bottom:4px;background:var(--bg2);
+  cursor:pointer;transition:all .15s;border-radius:3px;
+}
+.queue-item:hover{border-color:var(--border2);background:rgba(0,217,255,.02)}
+.qi-icon{
+  width:28px;height:28px;background:var(--bg);border:1px solid var(--border2);
+  display:flex;align-items:center;justify-content:center;
+  font-family:var(--mono);font-size:8px;color:var(--text3);flex-shrink:0;
+  border-radius:3px;text-transform:uppercase;font-weight:600;
+}
+.qi-info{flex:1;min-width:0}
+.qi-name{font-family:var(--body);font-weight:600;font-size:12px;color:var(--text);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.qi-sub{font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:2px}
+.qi-mini-bar{flex:0 0 60px;height:3px;background:var(--border);border-radius:2px;overflow:hidden}
+.qi-mini-fill{height:100%;background:var(--accent);transition:width .3s}
+.qi-pct{
+  font-family:var(--mono);font-size:9px;color:var(--text2);white-space:nowrap;
+  flex:0 0 auto;
+}
+
+.file-row{
+  display:flex;align-items:center;gap:10px;padding:8px;
+  border-bottom:1px solid var(--border);cursor:pointer;
+  transition:background .1s;
+}
+.file-row:hover{background:rgba(0,217,255,.03)}
+.file-icon{width:14px;height:14px;border:1px solid var(--accent2);display:flex;align-items:center;justify-content:center;
+  font-size:8px;flex-shrink:0;border-radius:2px;color:var(--accent2);
+}
+.fi-name{font-family:var(--body);font-size:11px;color:var(--text);
+  flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.fi-size{font-family:var(--mono);font-size:9px;color:var(--text2);white-space:nowrap;flex-shrink:0}
+.fi-status{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.fi-status.ok{background:var(--success);box-shadow:0 0 4px var(--success)}
+.fi-status.pending{background:var(--warning)}
+.fi-status.error{background:var(--error)}
+
+/* ──────────── RIGHT: LOGS ─────────────────── */
+.log-panel{grid-row:2;grid-column:3;display:flex;flex-direction:column;border-right:none}
+
+.log-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 14px;background:var(--bg3);border-bottom:1px solid var(--border);flex-shrink:0;
+}
+
+.log-body{
+  flex:1;overflow-y:auto;padding:8px;
+  font-family:var(--mono);font-size:9px;line-height:1.7;
+}
+.log-body::-webkit-scrollbar{width:4px}
+.log-body::-webkit-scrollbar-thumb{background:var(--border2)}
+
+.log-line{
+  display:flex;gap:8px;opacity:0;animation:log-in .2s forwards;
+  padding:2px 4px;border-radius:2px;
+  transition:background .15s;
+}
+.log-line:hover{background:rgba(0,217,255,.05)}
+@keyframes log-in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+.ll-time{color:var(--text3);flex-shrink:0;width:55px;font-weight:600}
+.ll-level{flex-shrink:0;width:32px;font-weight:700;text-transform:uppercase}
+.ll-level.info{color:var(--accent)}.ll-level.ok{color:var(--success)}.ll-level.warn{color:var(--warning)}.ll-level.error{color:var(--error)}
+.ll-msg{color:var(--text2);word-break:break-word}
+
+/* ──────────── BOTTOM: STATS ───────────────── */
+.bottom{
+  grid-row:3;grid-column:1/-1;
+  display:grid;grid-template-columns:200px 1fr 280px;
+  gap:1px;background:var(--border);
+}
+.bpanel{background:var(--bg2);padding:10px 14px;display:flex;flex-direction:column;gap:5px}
+.b-label{font-family:var(--mono);font-size:8px;color:var(--text3);text-transform:uppercase;letter-spacing:.1em;font-weight:600}
+.b-value{font-family:var(--mono);font-size:16px;color:var(--accent);font-weight:700;line-height:1.2}
+.b-value span{font-size:10px;color:var(--text3)}
+
+.bw-panel{background:var(--panel);padding:10px 14px;display:flex;flex-direction:column;gap:6px}
+.bw-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:2px}
+.bw-title{font-family:var(--sans);font-weight:700;font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:var(--text)}
+.bw-legend{display:flex;gap:12px;font-family:var(--mono);font-size:8px;color:var(--text2)}
+.bw-leg-item{display:flex;align-items:center;gap:4px}
+.bw-dot{width:10px;height:2px;background:currentColor}
+
+canvas#bwChart{width:100%;height:85px;display:block}
+
+.stats-panel{background:var(--bg2);padding:10px 14px;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.stat-block{display:flex;flex-direction:column;gap:3px}
+.sb-label{font-family:var(--mono);font-size:7px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;font-weight:600}
+.sb-value{font-family:var(--mono);font-size:12px;color:var(--text);font-weight:600}
+.sb-sub{font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:1px}
+
+/* ──────────── MODALS ──────────────────────── */
+.modal-overlay{
+  position:fixed;inset:0;background:rgba(0,0,0,.7);
+  z-index:100;display:flex;align-items:center;justify-content:center;
+  opacity:0;pointer-events:none;transition:opacity .2s;
+  backdrop-filter:blur(4px);
+}
+.modal-overlay.open{opacity:1;pointer-events:all}
+
+.modal{
+  background:var(--panel);border:1px solid var(--border2);
+  width:500px;max-width:90vw;position:relative;
+  border-radius:6px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.5);
+  transform:scale(0.9);transition:transform .2s;
+}
+.modal-overlay.open .modal{transform:scale(1)}
+
+.modal::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,var(--accent2),var(--accent))
+}
+
+.mh{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:14px 16px;border-bottom:1px solid var(--border);
+}
+.mh-title{
+  font-family:var(--sans);font-weight:700;font-size:12px;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--accent);
+}
+.mh-close{
+  background:none;border:1px solid var(--border2);color:var(--text2);
+  width:24px;height:24px;cursor:pointer;font-size:14px;
+  display:flex;align-items:center;justify-content:center;
+  transition:all .15s;border-radius:3px;
+}
+.mh-close:hover{border-color:var(--error);color:var(--error)}
+
+.mb{padding:16px}
+.form-section{margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--border)}
+.form-section:last-child{margin-bottom:0;padding-bottom:0;border-bottom:none}
+
+.mf{
+  padding:12px 16px;border-top:1px solid var(--border);
+  display:flex;justify-content:flex-end;gap:8px;
+  background:rgba(0,0,0,.2);
+}
+
+/* Notifications */
+.notification-stack{
+  position:fixed;bottom:150px;right:16px;z-index:200;
+  display:flex;flex-direction:column;gap:6px;pointer-events:none;
+}
+.notification{
+  background:var(--bg2);border:1px solid var(--border2);border-left:3px solid var(--accent);
+  padding:10px 14px;font-family:var(--mono);font-size:10px;color:var(--text);
+  border-radius:3px;animation:notify-in .3s ease,notify-out .3s ease 4.7s forwards;
+  max-width:320px;pointer-events:all;
+}
+.notification.success{border-left-color:var(--success)}
+.notification.error{border-left-color:var(--error)}
+.notification.warn{border-left-color:var(--warning)}
+@keyframes notify-in{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:none}}
+@keyframes notify-out{to{opacity:0;transform:translateX(24px);pointer-events:none}}
+
+/* Offline banner */
+.offline-banner{
+  display:none;position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:150;
+  background:var(--bg2);border:1px solid var(--error);border-left:3px solid var(--error);
+  padding:12px 16px;font-family:var(--mono);font-size:10px;color:var(--text);
+  border-radius:4px;box-shadow:0 10px 30px rgba(255,51,102,.2);
+  max-width:500px;
+}
+.offline-banner.show{display:block}
+.offline-banner-close{
+  position:absolute;right:8px;top:8px;background:none;border:none;
+  color:var(--text3);cursor:pointer;font-size:12px;
+}
+
+/* Dialogs */
+.dialog-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:90}
+.dialog{
+  display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+  z-index:200;background:var(--panel);border:1px solid var(--border2);
+  border-radius:6px;padding:20px;max-width:400px;box-shadow:0 20px 60px rgba(0,0,0,.5);
+}
+.dialog.show ~ .dialog-backdrop{display:block}
+.dialog.show{display:block}
+</style>
+</head>
+<body>
+
+<div class="app">
+
+<!-- ═══ HEADER ════════════════════════════════════════ -->
+<header>
+  <div class="logo">
+    <div class="logo-icon"></div>
+    VITRUVIUS
+  </div>
+  <div class="vsep"></div>
+  
+  <div class="node-status" id="nodeStatus" title="Click to copy your node ID">
+    <div class="status-dot offline" id="statusDot"></div>
+    <span id="nodeNameDisplay" class="h-status-text">Waiting…</span>
+  </div>
+  
+  <span style="font-family:var(--mono);font-size:9px;color:var(--text3);max-width:200px;overflow:hidden;text-overflow:ellipsis">
+    <span id="nodeIdDisplay">Not connected</span>
+  </span>
+  
+  <div class="spacer"></div>
+  
+  <div class="h-stats">
+    <div class="hstat">
+      <span class="hstat-label">Connected</span>
+      <span class="hstat-value success" id="hConnected">0</span>
+    </div>
+    <div class="hstat">
+      <span class="hstat-label">Active Syncs</span>
+      <span class="hstat-value" id="hActiveSyncs">0</span>
+    </div>
+    <div class="hstat">
+      <span class="hstat-label">Chunks RX</span>
+      <span class="hstat-value accent" id="hChunksRx">0</span>
+    </div>
+    
+    <button class="btn btn-accent sm" id="syncBtn" onclick="openModal('mNewSync')" title="Start a new sync session">+ SYNC</button>
+    <button class="btn btn-neutral sm" id="settingsBtn" onclick="openModal('mSettings')" title="Settings">⚙</button>
+  </div>
+</header>
+
+<!-- ═══ LEFT: PEERS ═════════════════════════════════ -->
+<div class="panel peers-panel">
+  <div class="ph">
+    <span class="ph-title">Connected Peers</span>
+    <span class="ph-badge" id="peerCount">0</span>
+  </div>
+  
+  <div class="cform">
+    <div class="form-group">
+      <label class="form-label">Peer ID or Multiaddr</label>
+      <input type="text" id="inPeerId" placeholder="12D3KooW… or /ip4/…/tcp/…" />
+    </div>
+    <div class="form-row">
+      <button class="btn btn-accent sm" onclick="dialPeer()" style="flex:1">DIAL</button>
+      <button class="btn btn-neutral sm" onclick="clearPeerInputs()">CLEAR</button>
+    </div>
+  </div>
+  
+  <div class="disc-indicator">
+    <div class="disc-dots">
+      <span></span><span></span><span></span>
+    </div>
+    <span class="disc-text" id="discStatus">Waiting for backend…</span>
+  </div>
+  
+  <div class="pscroll" id="peerList">
+    <div class="empty-state">
+      <div class="empty-icon">⬡</div>
+      <div>No peers discovered yet.</div>
+      <div style="font-size:8px;color:var(--text3)">mDNS discovery is active</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ CENTER: MAIN CONTENT ═════════════════════════ -->
+<div class="main-panel panel">
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('transfer', this)">TRANSFER</div>
+    <div class="tab" onclick="switchTab('queue', this)">QUEUE</div>
+    <div class="tab" onclick="switchTab('files', this)">FILES</div>
+  </div>
+  
+  <!-- Transfer Tab -->
+  <div class="tab-content active" id="tab-transfer">
+    <div id="transferContainer" style="flex:1;overflow-y:auto;padding:0">
+      <div class="empty-state" style="padding:60px 20px;justify-content:center">
+        <div class="empty-icon" style="width:48px;height:48px;font-size:24px">↓</div>
+        <div style="font-size:11px">No active transfer</div>
+        <div style="font-size:9px;color:var(--text3);margin-top:4px">Select a peer and start sync</div>
+      </div>
+    </div>
+  </div>
+  
+  <!-- Queue Tab -->
+  <div class="tab-content" id="tab-queue">
+    <div class="ph" style="flex-shrink:0">
+      <span class="ph-title">Transfer Queue</span>
+      <button class="btn btn-neutral sm" onclick="clearQueue()">CLEAR DONE</button>
+    </div>
+    <div class="pscroll">
+      <div id="queueContainer">
+        <div class="empty-state">Queue is empty</div>
+      </div>
+    </div>
+  </div>
+  
+  <!-- Files Tab -->
+  <div class="tab-content" id="tab-files">
+    <div class="ph" style="flex-shrink:0">
+      <span class="ph-title" id="filesLabel">Local Sync Folder</span>
+      <button class="btn btn-neutral sm" onclick="setFolder()">SET FOLDER</button>
+    </div>
+    <div class="pscroll">
+      <div id="filesContainer">
+        <div class="empty-state">
+          <div class="empty-icon">📁</div>
+          <div>No sync folder configured</div>
+          <div style="font-size:8px;color:var(--text3);margin-top:4px">Use the settings or click SET FOLDER</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ RIGHT: LOG ═══════════════════════════════════ -->
+<div class="panel log-panel">
+  <div class="log-header">
+    <span class="ph-title">Event Log</span>
+    <div style="display:flex;gap:4px">
+      <button class="btn btn-neutral sm" id="pauseBtn" onclick="toggleLogPause()">⏸</button>
+      <button class="btn btn-neutral sm" onclick="clearLog()">CLR</button>
+    </div>
+  </div>
+  <div class="log-body" id="logContainer"></div>
+</div>
+
+<!-- ═══ BOTTOM: STATS ════════════════════════════════ -->
+<div class="bottom">
+  <!-- Left: Speed -->
+  <div class="bpanel">
+    <div>
+      <div class="b-label">Download</div>
+      <div class="b-value" id="dlSpeed">0.0 <span>MB/s</span></div>
+    </div>
+    <div style="margin-top:8px">
+      <div class="b-label">Upload</div>
+      <div class="b-value" style="color:var(--accent2)" id="ulSpeed">0.0 <span>MB/s</span></div>
+    </div>
+  </div>
+  
+  <!-- Middle: Bandwidth Chart -->
+  <div class="bw-panel">
+    <div class="bw-header">
+      <span class="bw-title">Bandwidth</span>
+      <div class="bw-legend">
+        <span class="bw-leg-item" style="color:var(--success)">
+          <span class="bw-dot"></span>DL
+        </span>
+        <span class="bw-leg-item" style="color:var(--accent)">
+          <span class="bw-dot"></span>UL
+        </span>
+      </div>
+    </div>
+    <canvas id="bwChart"></canvas>
+  </div>
+  
+  <!-- Right: System Stats -->
+  <div class="stats-panel">
+    <div class="stat-block">
+      <span class="sb-label">Uptime</span>
+      <span class="sb-value" id="uptimeVal">00:00:00</span>
+    </div>
+    <div class="stat-block">
+      <span class="sb-label">Total RX</span>
+      <span class="sb-value" id="totalRxVal">0.00 MB</span>
+    </div>
+    <div class="stat-block">
+      <span class="sb-label">Chunks (R/S)</span>
+      <span class="sb-value" id="chunkCountVal">0 / 0</span>
+    </div>
+    <div class="stat-block">
+      <span class="sb-label">Backend Status</span>
+      <span class="sb-value" style="color:var(--error)" id="backendStatus">OFFLINE</span>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<!-- ═══ OFFLINE BANNER ════════════════════════════════ -->
+<div class="offline-banner" id="offlineBanner">
+  ⚠ Backend offline — unable to connect to Vitruvius server
+  <button class="offline-banner-close" onclick="closeOfflineBanner()">✕</button>
+</div>
+
+<!-- ═══ NOTIFICATIONS ════════════════════════════════ -->
+<div class="notification-stack" id="notificationStack"></div>
+
+<!-- ═══ MODAL: NEW SYNC ═══════════════════════════════ -->
+<div class="modal-overlay" id="mNewSync">
+  <div class="modal">
+    <div class="mh">
+      <span class="mh-title">New Sync Session</span>
+      <button class="mh-close" onclick="closeModal('mNewSync')">✕</button>
+    </div>
+    <div class="mb">
+      <div class="form-section">
+        <label class="form-label">Target Peer ID</label>
+        <input type="text" id="m_peerId" placeholder="12D3KooW…" />
+        <div style="font-size:8px;color:var(--text3);margin-top:4px">libp2p PeerID of the remote peer</div>
+      </div>
+      <div class="form-section">
+        <label class="form-label">Multiaddr (optional)</label>
+        <input type="text" id="m_addr" placeholder="/ip4/192.168.1.x/tcp/…" />
+        <div style="font-size:8px;color:var(--text3);margin-top:4px">Leave empty if peer is discovered via mDNS</div>
+      </div>
+      <div class="form-section">
+        <label class="form-label">Sync Folder Path</label>
+        <div class="form-row">
+          <input type="text" id="m_folder" placeholder="/home/user/sync" style="flex:1" />
+          <button class="btn btn-neutral sm" onclick="browseFolder()" title="Browse">📁</button>
+        </div>
+      </div>
+    </div>
+    <div class="mf">
+      <button class="btn btn-neutral" onclick="closeModal('mNewSync')">CANCEL</button>
+      <button class="btn btn-success" onclick="doSync()">START SYNC</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ MODAL: SETTINGS ═══════════════════════════════ -->
+<div class="modal-overlay" id="mSettings">
+  <div class="modal">
+    <div class="mh">
+      <span class="mh-title">Settings</span>
+      <button class="mh-close" onclick="closeModal('mSettings')">✕</button>
+    </div>
+    <div class="mb">
+      <div class="form-section">
+        <label class="form-label">WebSocket URL</label>
+        <input type="text" id="s_wsUrl" value="ws://127.0.0.1:8080" />
+        <div style="font-size:8px;color:var(--text3);margin-top:4px">Backend WebSocket address</div>
+      </div>
+      <div class="form-section">
+        <label class="form-label">Sync Folder Path</label>
+        <div class="form-row">
+          <input type="text" id="s_folder" placeholder="/path/to/sync" style="flex:1" />
+          <button class="btn btn-neutral sm" onclick="browseFolder('s_folder')">📁</button>
+        </div>
+      </div>
+      <div class="form-section" style="border-bottom:none">
+        <label class="form-label">Auto-Connect</label>
+        <div style="margin-top:6px;display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="s_autoConnect" style="width:16px;height:16px;cursor:pointer" checked />
+          <label for="s_autoConnect" style="font-size:10px;color:var(--text2);cursor:pointer;flex:1">
+            Reconnect automatically on disconnect
+          </label>
+        </div>
+      </div>
+    </div>
+    <div class="mf">
+      <button class="btn btn-neutral" onclick="closeModal('mSettings')">CANCEL</button>
+      <button class="btn btn-accent" onclick="saveSettings()">SAVE & RECONNECT</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════
+const STATE = {
+  ws: null,
+  wsUrl: 'ws://127.0.0.1:8080',
+  nodeId: null,
+  nodeName: 'Vitruvius Node',
+  peers: {},           // peer_id → {id, addr, name, status, chunksRx, chunksTx, files, diskUsage}
+  transfers: {},       // peer_id → {fileName, total, done, failed, fileSize, startMs, chunkStates}
+  queue: [],           // [{fileName, peerId, total, done, ext}]
+  syncFolder: null,
+  localFiles: [],      // [{name, size}]
+  totalRxBytes: 0,
+  chunksRx: 0,
+  chunksTx: 0,
+  connectedPeers: 0,
+  activeSyncs: 0,
+  logPaused: false,
+  uptime: 0,
+  bwHistory: { dl: Array(60).fill(0), ul: Array(60).fill(0) },
+  lastChunkTime: 0,
+  autoConnect: true,
+};
+
+// ═══════════════════════════════════════════════════════
+// WEBSOCKET
+// ═══════════════════════════════════════════════════════
+function connect() {
+  if (STATE.ws) {
+    try { STATE.ws.close(); } catch(_) {}
+    STATE.ws = null;
+  }
+
+  STATE.ws = new WebSocket(STATE.wsUrl);
+  STATE.ws.onopen = onWsOpen;
+  STATE.ws.onclose = onWsClose;
+  STATE.ws.onerror = () => {};
+  STATE.ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      handleMessage(msg);
+    } catch(ex) {
+      console.error('WS parse error:', ex);
+    }
+  };
+}
+
+function send(msg) {
+  if (STATE.ws?.readyState === WebSocket.OPEN) {
+    STATE.ws.send(JSON.stringify(msg));
+  }
+}
+
+function onWsOpen() {
+  closeOfflineBanner();
+  setBackendStatus('ONLINE', true);
+  addLog('OK', 'Connected to Vitruvius backend');
+  notification('Backend connected', 'success');
+  updateDiscoveryStatus('mDNS discovery active');
+  setStatusDot('online');
+}
+
+function onWsClose() {
+  showOfflineBanner();
+  setBackendStatus('OFFLINE', false);
+  addLog('ERROR', 'Backend disconnected. Attempting to reconnect…');
+  setStatusDot('offline');
+  updateDiscoveryStatus('Reconnecting…');
+  if (STATE.autoConnect) {
+    setTimeout(connect, 3000);
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// MESSAGE HANDLER (Backend → GUI)
+// ═══════════════════════════════════════════════════════
+function handleMessage(msg) {
+  switch (msg.type) {
+    case 'Identity':
+      STATE.nodeId = msg.peer_id;
+      STATE.nodeName = msg.node_name || 'Vitruvius Node';
+      document.getElementById('nodeNameDisplay').textContent = STATE.nodeName;
+      document.getElementById('nodeIdDisplay').textContent = msg.peer_id.slice(0, 16) + '…';
+      document.title = `Vitruvius — ${STATE.nodeName}`;
+      setStatusDot('online');
+      updateDiscoveryStatus('Listening…');
+      addLog('OK', `Node: ${STATE.nodeName} (${msg.peer_id.slice(0, 12)}…)`);
+      break;
+
+    case 'PeerDiscovered':
+      if (!STATE.peers[msg.peer_id]) {
+        STATE.peers[msg.peer_id] = {
+          id: msg.peer_id,
+          addr: msg.addr,
+          name: msg.node_name || `Node-${msg.peer_id.slice(-8).toUpperCase()}`,
+          status: 'discovered',
+          chunksRx: 0,
+          chunksTx: 0,
+          files: 0,
+        };
+      } else {
+        STATE.peers[msg.peer_id].status = 'discovered';
+        STATE.peers[msg.peer_id].addr = msg.addr;
+        STATE.peers[msg.peer_id].name = msg.node_name || STATE.peers[msg.peer_id].name;
+      }
+      renderPeers();
+      addLog('INFO', `Discovered: ${STATE.peers[msg.peer_id].name}`);
+      break;
+
+    case 'PeerConnected':
+      if (!STATE.peers[msg.peer_id]) {
+        STATE.peers[msg.peer_id] = {
+          id: msg.peer_id,
+          name: msg.node_name || `Node-${msg.peer_id.slice(-8).toUpperCase()}`,
+          status: 'connected',
+          chunksRx: 0,
+          chunksTx: 0,
+          files: 0,
+        };
+      } else {
+        STATE.peers[msg.peer_id].status = 'connected';
+      }
+      STATE.connectedPeers = Object.values(STATE.peers).filter(p => p.status === 'connected' || p.status === 'syncing').length;
+      renderPeers();
+      updateHeader();
+      addLog('OK', `Connected: ${STATE.peers[msg.peer_id].name}`);
+      notification(`${STATE.peers[msg.peer_id].name} connected`, 'success');
+      break;
+
+    case 'PeerDisconnected':
+      if (STATE.peers[msg.peer_id]) {
+        addLog('WARN', `Disconnected: ${STATE.peers[msg.peer_id].name}`);
+        delete STATE.peers[msg.peer_id];
+      }
+      STATE.connectedPeers = Object.values(STATE.peers).filter(p => p.status === 'connected' || p.status === 'syncing').length;
+      renderPeers();
+      updateHeader();
+      break;
+
+    case 'TransferStarted':
+      STATE.peers[msg.peer_id] = STATE.peers[msg.peer_id] || {};
+      STATE.peers[msg.peer_id].status = 'syncing';
+      STATE.activeSyncs = Object.values(STATE.peers).filter(p => p.status === 'syncing').length;
+      STATE.transfers[msg.peer_id] = {
+        fileName: msg.file_name,
+        total: msg.total_chunks,
+        done: 0,
+        failed: 0,
+        fileSize: msg.file_size,
+        startMs: Date.now(),
+        chunkStates: new Array(msg.total_chunks).fill(0),
+      };
+      STATE.queue.unshift({
+        fileName: msg.file_name,
+        peerId: msg.peer_id,
+        total: msg.total_chunks,
+        done: 0,
+        ext: msg.file_name.split('.').pop().toUpperCase().slice(0, 3),
+      });
+      renderPeers();
+      renderTransfer();
+      renderQueue();
+      updateHeader();
+      addLog('OK', `Transfer started: ${msg.file_name}`);
+      notification(`Syncing: ${msg.file_name}`, 'success');
+      break;
+
+    case 'ChunkReceived':
+      if (!STATE.transfers[msg.peer_id]) break;
+      const t = STATE.transfers[msg.peer_id];
+      STATE.chunksRx++;
+      STATE.totalRxBytes += 524288; // 512KB
+      if (msg.verified) {
+        t.done++;
+        if (t.chunkStates && msg.chunk_index < t.chunkStates.length) {
+          t.chunkStates[msg.chunk_index] = 1;
+        }
+        if (STATE.peers[msg.peer_id]) STATE.peers[msg.peer_id].chunksRx++;
+      } else {
+        t.failed++;
+        if (t.chunkStates && msg.chunk_index < t.chunkStates.length) {
+          t.chunkStates[msg.chunk_index] = 2;
+        }
+      }
+      renderTransfer();
+      renderQueue();
+      updateHeader();
+      break;
+
+    case 'TransferComplete':
+      const peer = STATE.peers[msg.peer_id];
+      if (peer) {
+        peer.status = 'connected';
+        peer.files = (peer.files || 0) + 1;
+      }
+      STATE.activeSyncs = Object.values(STATE.peers).filter(p => p.status === 'syncing').length;
+      if (STATE.transfers[msg.peer_id]) {
+        STATE.transfers[msg.peer_id].done = STATE.transfers[msg.peer_id].total;
+      }
+      const qi = STATE.queue.find(q => q.peerId === msg.peer_id && q.fileName === msg.file_name);
+      if (qi) qi.done = qi.total;
+      renderPeers();
+      renderTransfer();
+      renderQueue();
+      updateHeader();
+      addLog('OK', `✓ Complete: ${msg.file_name}`);
+      notification(`Sync complete: ${msg.file_name}`, 'success');
+      break;
+
+    case 'FileList':
+      STATE.localFiles = msg.files || [];
+      renderFiles();
+      break;
+
+    case 'Log':
+      addLog(msg.level, msg.message);
+      break;
+
+    case 'Error':
+      addLog('ERROR', msg.message);
+      notification(msg.message, 'error');
+      break;
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// RENDER PEERS
+// ═══════════════════════════════════════════════════════
+function renderPeers() {
+  const list = document.getElementById('peerList');
+  const peerList = Object.values(STATE.peers);
+  document.getElementById('peerCount').textContent = peerList.length;
+
+  if (!peerList.length) {
+    list.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">⬡</div>
+        <div>No peers discovered</div>
+        <div style="font-size:8px;color:var(--text3);margin-top:4px">mDNS discovery is active…</div>
+      </div>
+    `;
+    return;
+  }
+
+  list.innerHTML = peerList.map(p => `
+    <div class="peer-card ${p.status}">
+      <div class="pc-content">
+        <div class="pc-header">
+          <span class="pc-name">${p.name}</span>
+          <span class="pc-tag tag-${p.status}">${p.status.toUpperCase()}</span>
+        </div>
+        <div class="pc-peerId">${p.id.slice(0, 18)}…</div>
+        <div class="pc-stats">
+          <div class="pcstat">
+            <span class="pcstat-label">RX Chunks</span>
+            <span class="pcstat-value">${p.chunksRx || 0}</span>
+          </div>
+          <div class="pcstat">
+            <span class="pcstat-label">TX Chunks</span>
+            <span class="pcstat-value">${p.chunksTx || 0}</span>
+          </div>
+          <div class="pcstat">
+            <span class="pcstat-label">Files</span>
+            <span class="pcstat-value">${p.files || 0}</span>
+          </div>
+        </div>
+        <div class="pc-actions">
+          <button class="btn btn-accent sm" onclick="requestSync('${p.id}')"
+            ${p.status === 'discovered' || p.status === 'connected' ? '' : 'disabled'}>
+            SYNC
+          </button>
+          ${p.status === 'discovered'
+            ? `<button class="btn btn-neutral sm" onclick="dialPeerDirect('${p.id}', '${p.addr || ''}')">DIAL</button>`
+            : `<button class="btn btn-error sm" onclick="disconnectPeer('${p.id}')">DISC</button>`
+          }
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ═══════════════════════════════════════════════════════
+// RENDER TRANSFER
+// ═══════════════════════════════════════════════════════
+function renderTransfer() {
+  const container = document.getElementById('transferContainer');
+  const peerId = Object.keys(STATE.transfers)[0];
+  
+  if (!peerId) {
+    container.innerHTML = `
+      <div class="empty-state" style="padding:60px 20px">
+        <div class="empty-icon" style="width:48px;height:48px;font-size:24px">↓</div>
+        <div style="font-size:11px">No active transfer</div>
+        <div style="font-size:9px;color:var(--text3);margin-top:4px">Select a peer and start sync</div>
+      </div>
+    `;
+    return;
+  }
+
+  const t = STATE.transfers[peerId];
+  const pct = t.total ? Math.round((t.done / t.total) * 100) : 0;
+  const elapsed = (Date.now() - t.startMs) / 1000;
+  const speed = elapsed > 0 ? ((t.done * 524288) / (1024 * 1024 * elapsed)).toFixed(1) : '0.0';
+  const eta = t.done > 0 && elapsed > 0 ? Math.ceil(((t.total - t.done) / (t.done / elapsed))) : '—';
+  const sizeMB = (t.fileSize / (1024 * 1024)).toFixed(1);
+  const ext = t.fileName.split('.').pop().toUpperCase().slice(0, 3);
+
+  // Chunk grid
+  let chunkHtml = '';
+  const maxChunks = 200;
+  const step = Math.ceil(t.total / maxChunks);
+  for (let i = 0; i < t.total; i += step) {
+    const state = t.chunkStates[i] || 0;
+    const cls = state === 1 ? 'done' : state === 2 ? 'fail' : (i === t.done ? 'active' : '');
+    chunkHtml += `<div class="chunk ${cls}" title="Chunk ${i}"></div>`;
+  }
+
+  const peerName = (STATE.peers[peerId]?.name || peerId.slice(0, 12) + '…');
+
+  container.innerHTML = `
+    <div class="transfer-card">
+      <div class="tc-header">
+        <div class="tc-filename">
+          📄 ${t.fileName}
+          <span class="tc-ext">${ext}</span>
+        </div>
+        <div class="tc-peer">FROM: ${peerName}</div>
+      </div>
+      <div class="tc-body">
+        <div class="tc-progress">
+          <div class="prog-header">
+            <span class="prog-percent">${pct}%</span>
+            <span class="prog-frac">${t.done} / ${t.total} chunks · ${sizeMB} MB</span>
+          </div>
+          <div class="prog-bar-container">
+            <div class="prog-bar-fill" style="width:${pct}%"></div>
+          </div>
+        </div>
+        <div class="chunk-grid">${chunkHtml}</div>
+        <div class="transfer-stats">
+          <div class="tstat">
+            <span class="tstat-label">SPEED</span>
+            <span class="tstat-value accent">${speed} MB/s</span>
+          </div>
+          <div class="tstat">
+            <span class="tstat-label">ETA</span>
+            <span class="tstat-value">${typeof eta === 'number' ? eta + 's' : eta}</span>
+          </div>
+          <div class="tstat">
+            <span class="tstat-label">VERIFIED</span>
+            <span class="tstat-value success">${t.done} ✓</span>
+          </div>
+          <div class="tstat">
+            <span class="tstat-label">FAILED</span>
+            <span class="tstat-value" style="color:${t.failed ? 'var(--error)' : 'var(--text)'}">${t.failed}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ═══════════════════════════════════════════════════════
+// RENDER QUEUE
+// ═══════════════════════════════════════════════════════
+function renderQueue() {
+  const container = document.getElementById('queueContainer');
+  
+  if (!STATE.queue.length) {
+    container.innerHTML = '<div class="empty-state">Queue is empty</div>';
+    return;
+  }
+
+  container.innerHTML = STATE.queue.map((q, idx) => {
+    const pct = q.total ? Math.round((q.done / q.total) * 100) : 0;
+    const done = q.done >= q.total;
+    const peer = STATE.peers[q.peerId];
+    const peerName = peer?.name || `Node-${q.peerId.slice(-6)}`;
+
+    return `
+      <div class="queue-item">
+        <div class="qi-icon">${q.ext}</div>
+        <div class="qi-info">
+          <div class="qi-name">${q.fileName}</div>
+          <div class="qi-sub">${peerName} · ${q.total} chunks</div>
+        </div>
+        <div class="qi-mini-bar">
+          <div class="qi-mini-fill" style="width:${pct}%"></div>
+        </div>
+        <div class="qi-pct">${done ? '✓' : pct + '%'}</div>
+        ${done ? `<button class="btn btn-neutral sm" onclick="STATE.queue.splice(${idx},1);renderQueue()" style="padding:2px 6px">✕</button>` : ''}
+      </div>
+    `;
+  }).join('');
+}
+
+// ═══════════════════════════════════════════════════════
+// RENDER FILES
+// ═══════════════════════════════════════════════════════
+function renderFiles() {
+  const container = document.getElementById('filesContainer');
+
+  if (!STATE.localFiles || !STATE.localFiles.length) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">📁</div>
+        <div>No files in sync folder</div>
+        <div style="font-size:8px;color:var(--text3);margin-top:4px">Or folder not configured</div>
+      </div>
+    `;
+    return;
+  }
+
+  container.innerHTML = STATE.localFiles.map(f => {
+    const sizeMB = f.size >= 1048576
+      ? (f.size / 1048576).toFixed(1) + ' MB'
+      : f.size >= 1024
+        ? (f.size / 1024).toFixed(0) + ' KB'
+        : f.size + ' B';
+
+    return `
+      <div class="file-row">
+        <div class="file-icon">📄</div>
+        <div class="fi-name">${f.name}</div>
+        <div class="fi-size">${sizeMB}</div>
+        <div class="fi-status ok" title="Ready"></div>
+      </div>
+    `;
+  }).join('');
+}
+
+// ═══════════════════════════════════════════════════════
+// COMMANDS (GUI → Backend)
+// ═══════════════════════════════════════════════════════
+function dialPeer() {
+  const input = document.getElementById('inPeerId').value.trim();
+  if (!input) {
+    notification('Enter a Peer ID or Multiaddr', 'warn');
+    return;
+  }
+
+  // Try to parse as address first, else treat as peer ID
+  const isAddr = input.includes('/');
+  if (isAddr) {
+    send({ type: 'DialAddr', addr: input });
+    addLog('INFO', `Dialing ${input.slice(0, 30)}…`);
+  } else {
+    send({ type: 'DialPeer', peer_id: input });
+    addLog('INFO', `Dialing ${input.slice(0, 16)}…`);
+  }
+
+  clearPeerInputs();
+}
+
+function dialPeerDirect(peerId, addr) {
+  if (addr) {
+    send({ type: 'DialAddr', addr });
+  } else {
+    send({ type: 'DialPeer', peer_id: peerId });
+  }
+  addLog('INFO', `Dialing ${STATE.peers[peerId]?.name || peerId.slice(0, 12)}…`);
+}
+
+function requestSync(peerId) {
+  if (!STATE.syncFolder) {
+    notification('Set a sync folder first', 'warn');
+    openModal('mSettings');
+    return;
+  }
+  send({ type: 'RequestSync', peer_id: peerId });
+  addLog('INFO', `Requesting sync from ${STATE.peers[peerId]?.name}…`);
+}
+
+function disconnectPeer(peerId) {
+  send({ type: 'Disconnect', peer_id: peerId });
+  addLog('INFO', `Disconnecting from ${STATE.peers[peerId]?.name}…`);
+}
+
+function doSync() {
+  const peerId = document.getElementById('m_peerId').value.trim();
+  const addr = document.getElementById('m_addr').value.trim() || null;
+  const folder = document.getElementById('m_folder').value.trim();
+
+  if (!peerId) {
+    notification('Enter a Peer ID', 'warn');
+    return;
+  }
+
+  if (folder) {
+    send({ type: 'SetFolder', path: folder });
+    STATE.syncFolder = folder;
+    document.getElementById('s_folder').value = folder;
+  }
+
+  if (addr) {
+    send({ type: 'DialAddr', addr });
+  } else {
+    send({ type: 'DialPeer', peer_id: peerId });
+  }
+
+  setTimeout(() => {
+    send({ type: 'RequestSync', peer_id: peerId });
+  }, 1000);
+
+  addLog('INFO', `Initiating sync with ${peerId.slice(0, 12)}…`);
+  closeModal('mNewSync');
+  notification('Sync initiated…', 'success');
+}
+
+function setFolder() {
+  const folder = document.getElementById('s_folder').value.trim();
+  if (!folder) {
+    notification('Enter a folder path', 'warn');
+    return;
+  }
+  send({ type: 'SetFolder', path: folder });
+  STATE.syncFolder = folder;
+  document.getElementById('filesLabel').textContent = `Local Sync Folder: ${folder.split('/').pop()}`;
+  addLog('INFO', `Sync folder set to ${folder}`);
+  notification('Sync folder set', 'success');
+}
+
+function browseFolder(inputId = 'm_folder') {
+  if (window.showDirectoryPicker) {
+    window.showDirectoryPicker()
+      .then(handle => {
+        document.getElementById(inputId).value = handle.name;
+        notification('Folder selected — click SET to confirm', 'success');
+      })
+      .catch(() => {});
+  } else {
+    notification('File explorer not supported in your browser', 'warn');
+  }
+}
+
+function clearPeerInputs() {
+  document.getElementById('inPeerId').value = '';
+}
+
+function clearQueue() {
+  STATE.queue = STATE.queue.filter(q => q.done < q.total);
+  renderQueue();
+  addLog('INFO', 'Cleared completed transfers from queue');
+}
+
+// ═══════════════════════════════════════════════════════
+// LOG & NOTIFICATIONS
+// ═══════════════════════════════════════════════════════
+function addLog(level, msg) {
+  if (STATE.logPaused) return;
+  const logBody = document.getElementById('logContainer');
+  const now = new Date().toTimeString().slice(0, 8);
+  const line = document.createElement('div');
+  line.className = `log-line`;
+  line.innerHTML = `
+    <span class="ll-time">${now}</span>
+    <span class="ll-level ${level.toLowerCase()}">${level}</span>
+    <span class="ll-msg">${escapeHtml(msg)}</span>
+  `;
+  logBody.appendChild(line);
+  logBody.scrollTop = logBody.scrollHeight;
+  while (logBody.children.length > 300) {
+    logBody.removeChild(logBody.firstChild);
+  }
+}
+
+function clearLog() {
+  document.getElementById('logContainer').innerHTML = '';
+  addLog('INFO', 'Log cleared');
+}
+
+function toggleLogPause() {
+  STATE.logPaused = !STATE.logPaused;
+  document.getElementById('pauseBtn').textContent = STATE.logPaused ? '▶' : '⏸';
+}
+
+function notification(msg, type = 'success') {
+  const stack = document.getElementById('notificationStack');
+  const el = document.createElement('div');
+  el.className = `notification ${type}`;
+  el.textContent = msg;
+  stack.appendChild(el);
+  setTimeout(() => el.remove(), 5000);
+}
+
+function showOfflineBanner() {
+  document.getElementById('offlineBanner').classList.add('show');
+}
+
+function closeOfflineBanner() {
+  document.getElementById('offlineBanner').classList.remove('show');
+}
+
+// ═══════════════════════════════════════════════════════
+// MODALS
+// ═══════════════════════════════════════════════════════
+function openModal(id) {
+  document.getElementById(id).classList.add('open');
+}
+
+function closeModal(id) {
+  document.getElementById(id).classList.remove('open');
+}
+
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closeModal(overlay.id);
+  });
+});
+
+function saveSettings() {
+  const wsUrl = document.getElementById('s_wsUrl').value.trim();
+  const folder = document.getElementById('s_folder').value.trim();
+  
+  if (wsUrl) STATE.wsUrl = wsUrl;
+  if (folder) {
+    send({ type: 'SetFolder', path: folder });
+    STATE.syncFolder = folder;
+  }
+
+  STATE.autoConnect = document.getElementById('s_autoConnect').checked;
+  localStorage.setItem('vitruv_wsUrl', STATE.wsUrl);
+  localStorage.setItem('vitruv_folder', STATE.syncFolder || '');
+  localStorage.setItem('vitruv_autoConnect', STATE.autoConnect);
+
+  closeModal('mSettings');
+  notification('Settings saved. Reconnecting…', 'success');
+  connect();
+}
+
+// ═══════════════════════════════════════════════════════
+// TABS
+// ═══════════════════════════════════════════════════════
+function switchTab(name, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+}
+
+// ═══════════════════════════════════════════════════════
+// HEADER UPDATES
+// ═══════════════════════════════════════════════════════
+function updateHeader() {
+  document.getElementById('hConnected').textContent = STATE.connectedPeers;
+  document.getElementById('hActiveSyncs').textContent = STATE.activeSyncs;
+  document.getElementById('hChunksRx').textContent = STATE.chunksRx;
+  
+  const rxMB = (STATE.totalRxBytes / (1024 * 1024)).toFixed(2);
+  document.getElementById('totalRxVal').textContent = rxMB + ' MB';
+}
+
+function setStatusDot(status) {
+  const dot = document.getElementById('statusDot');
+  dot.className = `status-dot ${status}`;
+}
+
+function setBackendStatus(text, online) {
+  const el = document.getElementById('backendStatus');
+  el.textContent = text;
+  el.style.color = online ? 'var(--success)' : 'var(--error)';
+}
+
+function updateDiscoveryStatus(text) {
+  document.getElementById('discStatus').textContent = text;
+}
+
+// ═══════════════════════════════════════════════════════
+// BANDWIDTH CHART
+// ═══════════════════════════════════════════════════════
+const canvas = document.getElementById('bwChart');
+const ctx = canvas.getContext('2d');
+
+function resizeCanvas() {
+  canvas.width = canvas.offsetWidth;
+  canvas.height = canvas.offsetHeight;
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+function drawBandwidthChart() {
+  const W = canvas.width;
+  const H = canvas.height;
+  const data = STATE.bwHistory;
+  const maxBw = Math.max(1, ...data.dl, ...data.ul);
+  const N = data.dl.length;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // Grid
+  ctx.strokeStyle = 'rgba(26, 56, 89, 0.5)';
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 4; i++) {
+    const y = (H * i) / 4;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
+    ctx.stroke();
+  }
+
+  const drawLine = (dataArr, color, fillColor) => {
+    ctx.beginPath();
+    dataArr.forEach((v, i) => {
+      const x = (i / (N - 1)) * W;
+      const y = H - (v / maxBw) * (H * 0.85) - H * 0.075;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.lineTo(W, H);
+    ctx.lineTo(0, H);
+    ctx.closePath();
+    ctx.fillStyle = fillColor;
+    ctx.fill();
+  };
+
+  drawLine(data.dl, 'rgb(0, 255, 127)', 'rgba(0, 255, 127, 0.08)');
+  drawLine(data.ul, 'rgb(0, 217, 255)', 'rgba(0, 217, 255, 0.08)');
+}
+
+// ═══════════════════════════════════════════════════════
+// TICK LOOP
+// ═══════════════════════════════════════════════════════
+let prevChunks = 0;
+setInterval(() => {
+  // Uptime
+  STATE.uptime++;
+  const h = String(Math.floor(STATE.uptime / 3600)).padStart(2, '0');
+  const m = String(Math.floor((STATE.uptime % 3600) / 60)).padStart(2, '0');
+  const s = String(STATE.uptime % 60).padStart(2, '0');
+  document.getElementById('uptimeVal').textContent = `${h}:${m}:${s}`;
+
+  // Bandwidth calculation
+  const chunkDelta = STATE.chunksRx - prevChunks;
+  prevChunks = STATE.chunksRx;
+  const dlMBs = (chunkDelta * 524288) / (1024 * 1024);
+  const ulMBs = dlMBs * 0.3; // Estimate
+
+  STATE.bwHistory.dl.push(dlMBs);
+  STATE.bwHistory.dl.shift();
+  STATE.bwHistory.ul.push(ulMBs);
+  STATE.bwHistory.ul.shift();
+
+  document.getElementById('dlSpeed').innerHTML = dlMBs.toFixed(1) + ' <span>MB/s</span>';
+  document.getElementById('ulSpeed').innerHTML = ulMBs.toFixed(1) + ' <span>MB/s</span>';
+  document.getElementById('chunkCountVal').textContent = STATE.chunksRx + ' / ' + STATE.chunksTx;
+
+  drawBandwidthChart();
+}, 1000);
+
+// ═══════════════════════════════════════════════════════
+// UTILITIES
+// ═══════════════════════════════════════════════════════
+function escapeHtml(text) {
+  const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
+  return text.replace(/[&<>"']/g, m => map[m]);
+}
+
+// ═══════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════
+function initApp() {
+  // Load settings
+  const savedUrl = localStorage.getItem('vitruv_wsUrl');
+  const savedFolder = localStorage.getItem('vitruv_folder');
+  const savedAutoConnect = localStorage.getItem('vitruv_autoConnect');
+
+  if (savedUrl) STATE.wsUrl = savedUrl;
+  if (savedFolder) STATE.syncFolder = savedFolder;
+  if (savedAutoConnect !== null) STATE.autoConnect = savedAutoConnect === 'true';
+
+  document.getElementById('s_wsUrl').value = STATE.wsUrl;
+  document.getElementById('s_folder').value = STATE.syncFolder || '';
+  document.getElementById('s_autoConnect').checked = STATE.autoConnect;
+
+  // Connect
+  addLog('INFO', 'Vitruvius GUI loaded. Connecting to backend…');
+  connect();
+}
+
+// Click to copy node ID
+document.getElementById('nodeStatus').addEventListener('click', () => {
+  if (STATE.nodeId) {
+    navigator.clipboard.writeText(STATE.nodeId);
+    notification('Node ID copied to clipboard', 'success');
+  }
+});
+
+window.addEventListener('load', initApp);
+</script>
+</body>
+</html>

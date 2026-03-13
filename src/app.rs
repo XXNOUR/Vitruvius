@@ -1,9 +1,11 @@
-use crate::network::{MyBehaviourEvent, SyncMessage, SyncSession, setup_network};
-use crate::storage::{FileTransferState, FileVersion, get_file_list, get_versioned_metadata, process_received_chunk};
+use crate::network::{setup_network, MyBehaviourEvent, SyncMessage, SyncSession};
+use crate::storage::{
+    get_file_list, get_versioned_metadata, process_received_chunk, FileTransferState, FileVersion,
+};
 use crate::sync::SyncState;
+use crate::ws::{GuiEvent, WsServer};
 use anyhow::Result;
-use dialoguer::Input;
-use libp2p::{PeerId, futures::StreamExt, mdns, request_response, swarm::SwarmEvent};
+use libp2p::{futures::StreamExt, mdns, request_response, swarm::SwarmEvent};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -20,42 +22,58 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     info!("Starting Vitruvius with Delta-Aware Sync...");
 
     let mut swarm = setup_network().await?;
+    let local_peer_id = swarm.local_peer_id().clone();
+    let peer_id_str = local_peer_id.to_string();
+
+    println!("\n--- Vitruvius Node ---");
+    println!("YOUR ID: {}", peer_id_str);
+
+    // Initialize WebSocket server for GUI
+    let (ws_server, event_tx) = WsServer::new();
+    let ws_server = std::sync::Arc::new(ws_server);
+
+    // Send identity to GUI clients
+    event_tx.send(GuiEvent::Identity {
+        peer_id: peer_id_str.clone(),
+        node_name: "Vitruvius Node".to_string(),
+    })?;
+
+    // Start WebSocket server in background
+    let ws_server_clone = ws_server.clone();
+    tokio::spawn(async move {
+        if let Err(e) = ws_server_clone.start().await {
+            error!("WebSocket server error: {}", e);
+        }
+    });
 
     let mut sync_state = SyncState::new();
     let mut currently_writing: HashSet<String> = HashSet::new();
-    // paths that were modified/created/deleted as a result of incoming network activity
-    // we ignore watcher events for these to avoid loops
     let mut recently_remote: HashSet<String> = HashSet::new();
 
     // Cache for chunked files on the serving side
-    let mut cached_chunks: HashMap<String, (Vec<crate::storage::Chunk>, crate::storage::FileMetadata)> =
-        HashMap::new();
-    
-    // Track file versions for delta detection 
+    let mut cached_chunks: HashMap<
+        String,
+        (Vec<crate::storage::Chunk>, crate::storage::FileMetadata),
+    > = HashMap::new();
+
+    // Track file versions for delta detection
     let mut local_file_versions: HashMap<String, FileVersion> = HashMap::new();
     let mut remote_file_versions: HashMap<String, FileVersion> = HashMap::new();
 
-    let target_id_str: String = Input::new()
-        .with_prompt("Enter Peer ID to sync with (or leave empty to wait)")
-        .allow_empty(true)
-        .interact_text()?;
-    let target_peer_id = target_id_str.parse::<PeerId>().ok();
+    // Use a default sync path or allow setting via GUI later
+    let sync_path = fs::canonicalize(
+        std::env::var("VITRUVIUS_SYNC_DIR").unwrap_or_else(|_| "./sync".to_string()),
+    )
+    .unwrap_or_else(|_| PathBuf::from("./sync"));
 
-    let sync_path_input: String = Input::new()
-        .with_prompt("Enter folder path")
-        .interact_text()?;
-    let sync_path = PathBuf::from(&sync_path_input);
     if !sync_path.exists() {
         fs::create_dir_all(&sync_path)?;
     }
-    let sync_path_abs = fs::canonicalize(&sync_path)?;
 
-    info!("Syncing folder: {:?}", sync_path_abs);
-    if let Some(target) = target_peer_id {
-        info!("Will sync with peer: {}", target);
-    } else {
-        info!("Waiting for incoming connections...");
-    }
+    let sync_path_abs = sync_path.clone(); // For compatibility with rest of code
+
+    info!("Syncing folder: {:?}", sync_path);
+    info!("Waiting for GUI connections and peer discovery...");
 
     let (file_tx, mut file_rx) = mpsc::channel::<Event>(100);
 
@@ -65,11 +83,8 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         }
     })?;
 
-    watcher.watch(&sync_path_abs, RecursiveMode::Recursive)?;
+    watcher.watch(&sync_path, RecursiveMode::Recursive)?;
     info!("Watching folder for changes");
-
-    let local_peer_id = swarm.local_peer_id().clone();
-    let peer_id_str = local_peer_id.to_string();
 
     loop {
         tokio::select! {
@@ -79,12 +94,12 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                         for (peer_id, addr) in list {
                             info!("Discovered peer: {} at {}", peer_id, addr);
 
-                            if let Some(target) = target_peer_id {
-                                if peer_id == target {
-                                    info!("Target peer found, dialing...");
-                                    swarm.dial(addr)?;
-                                }
-                            }
+                            // Broadcast to GUI
+                            event_tx.send(GuiEvent::PeerDiscovered {
+                                peer_id: peer_id.to_string(),
+                                addr: addr.to_string(),
+                                node_name: None,
+                            }).ok();
                         }
                     }
 
@@ -95,16 +110,11 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                             sync_state.connected_peers.push(peer_id);
                         }
 
-                        if let Some(target) = target_peer_id {
-                            if peer_id == target {
-                                sync_state.sync_target_peer = Some(peer_id);
-                                info!("Requesting file list...");
-                                swarm.behaviour_mut().rr.send_request(
-                                    &peer_id,
-                                    SyncMessage::ListFiles,
-                                );
-                            }
-                        }
+                        // Broadcast to GUI
+                        event_tx.send(GuiEvent::PeerConnected {
+                            peer_id: peer_id.to_string(),
+                            node_name: None,
+                        }).ok();
                     }
 
                     SwarmEvent::Behaviour(MyBehaviourEvent::Rr(
@@ -388,7 +398,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                         transfer_state.metadata = Some(metadata.clone());
                                         transfer_state.current_version = Some(version.clone());
                                         transfer_state.set_required_chunks();
-                                        
+
                                         sync_state.transfer_states.insert(file_name.clone(), transfer_state);
 
                                         // Request only changed chunks (delta aware)
@@ -504,7 +514,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                                             let received_count = transfer_needed.received_chunks.iter()
                                                                 .filter(|(idx, _)| transfer_needed.required_chunks.contains(idx))
                                                                 .count();
-                                                            
+
                                                             // Request next chunk if available slots
                                                             if received_count < required_chunks.len() && transfer_needed.chunks_in_flight < MAX_CONCURRENT_CHUNKS {
                                                                 // Find next unrequested required chunk
