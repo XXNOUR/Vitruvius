@@ -21,7 +21,7 @@ impl Chunk {
     }
 }
 
-use super::metadata::FileMetadata;
+use super::metadata::{FileMetadata, FileVersion};
 
 /// Chunk a file into smaller pieces with hashes
 pub fn chunk_file(file_path: &PathBuf) -> Result<(Vec<Chunk>, FileMetadata)> {
@@ -82,3 +82,71 @@ pub fn chunk_file(file_path: &PathBuf) -> Result<(Vec<Chunk>, FileMetadata)> {
     );
     Ok((chunks, metadata))
 }
+
+/// Compute the hash of the entire file content
+pub fn compute_file_hash(chunks: &[Chunk]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    for chunk in chunks {
+        hasher.update(&chunk.data);
+    }
+    let hash = hasher.finalize();
+    *hash.as_bytes()
+}
+
+/// Detect which chunks have changed between two versions
+/// Returns a Vec of chunk indices that differ
+pub fn detect_changed_chunks(
+    old_hashes: &[[u8; 32]],
+    new_hashes: &[[u8; 32]],
+) -> Vec<usize> {
+    let mut changed = Vec::new();
+
+    // Find chunks that changed or were added
+    for (idx, new_hash) in new_hashes.iter().enumerate() {
+        if idx >= old_hashes.len() {
+            // New chunk
+            changed.push(idx);
+        } else if &old_hashes[idx] != new_hash {
+            // Changed chunk
+            changed.push(idx);
+        }
+    }
+
+    // Handle removed chunks (if new file is shorter)
+    // We don't track "removed chunks" explicitly as file is reassembled from new chunks
+
+    changed
+}
+
+/// Create a FileVersion from chunks (initial version)
+pub fn create_file_version(
+    chunks: &[Chunk],
+    metadata: FileMetadata,
+    author: String,
+) -> FileVersion {
+    let file_hash = compute_file_hash(chunks);
+    FileVersion::new(file_hash, metadata, author)
+}
+
+/// Create a FileVersion from a parent, computing delta
+pub fn create_file_version_from_parent(
+    chunks: &[Chunk],
+    metadata: FileMetadata,
+    author: String,
+    parent_version: &FileVersion,
+) -> FileVersion {
+    let file_hash = compute_file_hash(chunks);
+    let changed_chunks = detect_changed_chunks(
+        &parent_version.metadata.chunk_hashes,
+        &metadata.chunk_hashes,
+    );
+
+    FileVersion::from_parent(
+        file_hash,
+        metadata,
+        author,
+        parent_version,
+        changed_chunks,
+    )
+}
+

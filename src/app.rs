@@ -1,5 +1,5 @@
 use crate::network::{MyBehaviourEvent, SyncMessage, SyncSession, setup_network};
-use crate::storage::{FileTransferState, get_file_list, get_file_metadata, process_received_chunk};
+use crate::storage::{FileTransferState, FileVersion, get_file_list, get_versioned_metadata, process_received_chunk};
 use crate::sync::SyncState;
 use anyhow::Result;
 use dialoguer::Input;
@@ -17,7 +17,7 @@ const MAX_CONCURRENT_CHUNKS: usize = 8;
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt::init();
-    info!("Starting Vitruvius...");
+    info!("Starting Vitruvius with Delta-Aware Sync...");
 
     let mut swarm = setup_network().await?;
 
@@ -30,6 +30,10 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     // Cache for chunked files on the serving side
     let mut cached_chunks: HashMap<String, (Vec<crate::storage::Chunk>, crate::storage::FileMetadata)> =
         HashMap::new();
+    
+    // Track file versions for delta detection 
+    let mut local_file_versions: HashMap<String, FileVersion> = HashMap::new();
+    let mut remote_file_versions: HashMap<String, FileVersion> = HashMap::new();
 
     let target_id_str: String = Input::new()
         .with_prompt("Enter Peer ID to sync with (or leave empty to wait)")
@@ -63,6 +67,9 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     watcher.watch(&sync_path_abs, RecursiveMode::Recursive)?;
     info!("Watching folder for changes");
+
+    let local_peer_id = swarm.local_peer_id().clone();
+    let peer_id_str = local_peer_id.to_string();
 
     loop {
         tokio::select! {
@@ -121,31 +128,21 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                     SyncMessage::MetaDataRequest { file_name } => {
                                         info!("Received metadata request for: {}", file_name);
 
-                                        // Check cache first
-                                        let response = if let Some((_, metadata)) = cached_chunks.get(&file_name) {
-                                            SyncMessage::Metadata {
-                                                file_name: metadata.file_name.clone(),
-                                                total_chunks: metadata.total_chunks,
-                                                file_size: metadata.file_size,
-                                                chunk_hashes: metadata.chunk_hashes.clone(),
-                                            }
-                                        } else {
-                                            match get_file_metadata(&sync_path_abs, &file_name).await {
-                                                Ok(msg) => msg,
-                                                Err(e) => {
-                                                    SyncMessage::Error {
-                                                        message: format!("Failed to get metadata: {}", e),
-                                                    }
+                                        // Use versioned metadata for delta detection
+                                        let response = match get_versioned_metadata(&sync_path_abs, &file_name, peer_id_str.clone(), &local_file_versions).await {
+                                            Ok(msg) => msg,
+                                            Err(e) => {
+                                                SyncMessage::Error {
+                                                    message: format!("Failed to get metadata: {}", e),
                                                 }
                                             }
                                         };
 
                                         // Cache the chunks if metadata was successful
-                                        if let SyncMessage::Metadata { ref file_name, .. } = response {
+                                        if let SyncMessage::VersionedMetadata { ref file_name, .. } = response {
                                             if !cached_chunks.contains_key(file_name) {
                                                 let file_path = sync_path_abs.join(file_name);
                                                 if let Ok((chunks, mut metadata)) = crate::storage::chunk_file(&file_path) {
-                                                    // preserve the relative name (path) used by the sync protocol
                                                     metadata.file_name = file_name.clone();
                                                     cached_chunks.insert(file_name.clone(), (chunks, metadata));
                                                 }
@@ -206,6 +203,41 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                         }
                                     }
 
+                                    SyncMessage::FileChangedWithVersion { file_name, file_hash, changed_chunk_count, .. } => {
+                                        info!("Peer notified file changed (version): {} - {} chunks changed", file_name, changed_chunk_count);
+
+                                        // Check if we already have this version
+                                        if let Some(prev_version) = remote_file_versions.get(&file_name) {
+                                            if prev_version.file_hash == file_hash {
+                                                info!("Already have latest version for {}, skipping", file_name);
+                                                if let Err(e) = swarm.behaviour_mut().rr.send_response(
+                                                    channel,
+                                                    SyncMessage::TransferComplete,
+                                                ) {
+                                                    warn!("Failed to send response: {:?}", e);
+                                                }
+                                                continue;
+                                            }
+                                        }
+
+                                        // Clear cache and mark as remote
+                                        cached_chunks.remove(&file_name);
+                                        recently_remote.insert(file_name.clone());
+
+                                        // Request full metadata with delta details
+                                        swarm.behaviour_mut().rr.send_request(
+                                            &peer,
+                                            SyncMessage::MetaDataRequest { file_name },
+                                        );
+
+                                        if let Err(e) = swarm.behaviour_mut().rr.send_response(
+                                            channel,
+                                            SyncMessage::TransferComplete,
+                                        ) {
+                                            warn!("Failed to send TransferComplete response: {:?}", e);
+                                        }
+                                    }
+
                                     SyncMessage::FileChanged { file_name } => {
                                         info!("Peer notified file changed: {}", file_name);
 
@@ -215,7 +247,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                         // mark as remote so watcher skips it
                                         recently_remote.insert(file_name.clone());
 
-                                        // Request metadata to check if we need to update
+                                        // Request metadata to check what changed (including delta info)
                                         swarm.behaviour_mut().rr.send_request(
                                             &peer,
                                             SyncMessage::MetaDataRequest { file_name },
@@ -322,6 +354,60 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                         sync_state.current_session = Some(sync_session);
                                     }
 
+                                    SyncMessage::VersionedMetadata { file_name, file_hash, parent_hash: _, total_chunks, file_size, chunk_hashes, changed_chunks, timestamp: _, author } => {
+                                        info!("Received versioned metadata for '{}' ({} chunks, {} bytes, {} changed)",
+                                              file_name, total_chunks, file_size, changed_chunks.len());
+
+                                        let metadata = crate::storage::FileMetadata {
+                                            file_name: file_name.clone(),
+                                            total_chunks,
+                                            file_size,
+                                            chunk_hashes: chunk_hashes.clone(),
+                                        };
+
+                                        let version = crate::storage::FileVersion::from_parent(
+                                            file_hash,
+                                            metadata.clone(),
+                                            author.clone(),
+                                            remote_file_versions.get(&file_name).unwrap_or(&crate::storage::FileVersion::new(
+                                                [0u8; 32],
+                                                crate::storage::FileMetadata {
+                                                    file_name: file_name.clone(),
+                                                    total_chunks: 0,
+                                                    file_size: 0,
+                                                    chunk_hashes: vec![],
+                                                },
+                                                "unknown".to_string(),
+                                            )),
+                                            changed_chunks.clone(),
+                                        );
+
+                                        remote_file_versions.insert(file_name.clone(), version.clone());
+
+                                        let mut transfer_state = FileTransferState::new(sync_path_abs.clone());
+                                        transfer_state.metadata = Some(metadata.clone());
+                                        transfer_state.current_version = Some(version.clone());
+                                        transfer_state.set_required_chunks();
+                                        
+                                        sync_state.transfer_states.insert(file_name.clone(), transfer_state);
+
+                                        // Request only changed chunks (delta aware)
+                                        let chunks_to_request = std::cmp::min(MAX_CONCURRENT_CHUNKS, changed_chunks.len());
+                                        for i in 0..chunks_to_request {
+                                            if let Some(chunk_idx) = changed_chunks.get(i) {
+                                                if let Some(target) = sync_state.sync_target_peer {
+                                                    swarm.behaviour_mut().rr.send_request(
+                                                        &target,
+                                                        SyncMessage::ChunkRequest {
+                                                            file_name: file_name.clone(),
+                                                            chunk_index: *chunk_idx,
+                                                        }
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     SyncMessage::Metadata { file_name, total_chunks, file_size, chunk_hashes } => {
                                         info!("Received metadata for '{}' ({} chunks, {} bytes)",
                                               file_name, total_chunks, file_size);
@@ -336,6 +422,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                         let mut transfer_state = FileTransferState::new(sync_path_abs.clone());
                                         transfer_state.metadata = Some(metadata.clone());
                                         transfer_state.chunks_expected = total_chunks;
+                                        transfer_state.set_required_chunks();
                                         sync_state.transfer_states.insert(file_name.clone(), transfer_state);
 
                                         // Request first batch of chunks (up to MAX_CONCURRENT_CHUNKS)
@@ -362,9 +449,8 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                             }
                                         };
 
-                                        if let Some(metadata) = &transfer_needed.metadata {
-                                            let total_chunks = metadata.total_chunks;
-                                            if transfer_needed.received_chunks.len() < total_chunks {
+                                        if transfer_needed.metadata.is_some() {
+                                            if !transfer_needed.required_chunks.is_empty() && !transfer_needed.received_chunks.contains_key(&chunk_index) {
                                                 match process_received_chunk(
                                                     peer,
                                                     chunk_index,
@@ -379,6 +465,11 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                                             currently_writing.remove(&file_name);
 
                                                             info!("Transfer complete for: {}", file_name);
+
+                                                            // Update local version tracking
+                                                            if let Some(version) = transfer_needed.current_version.clone() {
+                                                                local_file_versions.insert(file_name.clone(), version);
+                                                            }
 
                                                             sync_state.transfer_states.remove(&file_name);
 
@@ -408,18 +499,29 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                                                 }
                                                             }
                                                         } else {
-                                                            let next_chunk_index = transfer_needed.next_chunk_to_request;
-                                                            if next_chunk_index < total_chunks && transfer_needed.chunks_in_flight < MAX_CONCURRENT_CHUNKS {
-                                                                transfer_needed.next_chunk_to_request += 1;
-                                                                transfer_needed.chunks_in_flight += 1;
-                                                                if let Some(target) = sync_state.sync_target_peer {
-                                                                    swarm.behaviour_mut().rr.send_request(
-                                                                        &target,
-                                                                        SyncMessage::ChunkRequest {
-                                                                            file_name: file_name.clone(),
-                                                                            chunk_index: next_chunk_index,
+                                                            // More chunks needed
+                                                            let required_chunks: Vec<usize> = transfer_needed.required_chunks.iter().cloned().collect();
+                                                            let received_count = transfer_needed.received_chunks.iter()
+                                                                .filter(|(idx, _)| transfer_needed.required_chunks.contains(idx))
+                                                                .count();
+                                                            
+                                                            // Request next chunk if available slots
+                                                            if received_count < required_chunks.len() && transfer_needed.chunks_in_flight < MAX_CONCURRENT_CHUNKS {
+                                                                // Find next unrequested required chunk
+                                                                for &req_chunk in &required_chunks {
+                                                                    if !transfer_needed.received_chunks.contains_key(&req_chunk) {
+                                                                        if let Some(target) = sync_state.sync_target_peer {
+                                                                            transfer_needed.chunks_in_flight += 1;
+                                                                            swarm.behaviour_mut().rr.send_request(
+                                                                                &target,
+                                                                                SyncMessage::ChunkRequest {
+                                                                                    file_name: file_name.clone(),
+                                                                                    chunk_index: req_chunk,
+                                                                                }
+                                                                            );
                                                                         }
-                                                                    );
+                                                                        break;
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -519,13 +621,28 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                 // Invalidate cache for this file
                                 cached_chunks.remove(&rel_path);
 
-                                for peer in &sync_state.connected_peers {
-                                    swarm.behaviour_mut().rr.send_request(
-                                        peer,
-                                        SyncMessage::FileChanged {
-                                            file_name: rel_path.clone(),
-                                        }
-                                    );
+                                // Compute version info for efficient delta sync
+                                if let Ok((chunks, metadata)) = crate::storage::chunk_file(&path) {
+                                    let version = if let Some(prev_version) = local_file_versions.get(&rel_path) {
+                                        crate::storage::create_file_version_from_parent(&chunks, metadata, peer_id_str.clone(), prev_version)
+                                    } else {
+                                        crate::storage::create_file_version(&chunks, metadata, peer_id_str.clone())
+                                    };
+
+                                    local_file_versions.insert(rel_path.clone(), version.clone());
+
+                                    // Notify all peers with version info
+                                    for peer_ref in &sync_state.connected_peers {
+                                        swarm.behaviour_mut().rr.send_request(
+                                            peer_ref,
+                                            SyncMessage::FileChangedWithVersion {
+                                                file_name: rel_path.clone(),
+                                                file_hash: version.file_hash,
+                                                changed_chunk_count: version.changed_chunks.len(),
+                                                timestamp: version.timestamp,
+                                            }
+                                        );
+                                    }
                                 }
                             }
                         }

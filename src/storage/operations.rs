@@ -3,9 +3,11 @@ use libp2p::PeerId;
 use std::fs;
 use std::path::PathBuf;
 use tracing::{error, info, warn};
+use std::collections::HashMap;
 
-use super::chunk::chunk_file;
+use super::chunk::{chunk_file, create_file_version, create_file_version_from_parent};
 use super::transfer::FileTransferState;
+use super::metadata::FileVersion;
 use crate::network::SyncMessage;
 
 /// Verify chunk integrity using Blake3 hash
@@ -75,6 +77,53 @@ pub async fn get_file_metadata(sync_path: &PathBuf, file_name: &str) -> Result<S
     })
 }
 
+/// Get versioned metadata with delta info
+pub async fn get_versioned_metadata(
+    sync_path: &PathBuf,
+    file_name: &str,
+    author: String,
+    previous_versions: &HashMap<String, FileVersion>,
+) -> Result<SyncMessage> {
+    info!("Getting versioned metadata for file: {}", file_name);
+
+    let file_path = sync_path.join(file_name);
+
+    if !file_path.exists() || !file_path.is_file() {
+        return Ok(SyncMessage::Error {
+            message: format!("File '{}' not found", file_name),
+        });
+    }
+
+    let canonical = fs::canonicalize(&file_path)?;
+    if !canonical.starts_with(sync_path) {
+        warn!("Path traversal attempt detected: {}", file_name);
+        return Ok(SyncMessage::Error {
+            message: "Invalid file path".to_string(),
+        });
+    }
+
+    let (chunks, metadata) = chunk_file(&file_path)?;
+
+    // Create versioned metadata with delta info
+    let version = if let Some(prev_version) = previous_versions.get(file_name) {
+        create_file_version_from_parent(&chunks, metadata.clone(), author, prev_version)
+    } else {
+        create_file_version(&chunks, metadata.clone(), author)
+    };
+
+    Ok(SyncMessage::VersionedMetadata {
+        file_name: metadata.file_name,
+        file_hash: version.file_hash,
+        parent_hash: version.parent_hash,
+        total_chunks: metadata.total_chunks,
+        file_size: metadata.file_size,
+        chunk_hashes: metadata.chunk_hashes,
+        changed_chunks: version.changed_chunks,
+        timestamp: version.timestamp,
+        author: version.author,
+    })
+}
+
 /// Process a received chunk
 /// Returns Ok(true) if file transfer is complete, Ok(false) if more chunks needed
 pub async fn process_received_chunk(
@@ -117,15 +166,13 @@ pub async fn process_received_chunk(
     }
 
     transfer_state.failed_chunks.remove(&chunk_index);
-
     transfer_state.received_chunks.insert(chunk_index, data);
 
-    if let Some(metadata) = &transfer_state.metadata {
-        if transfer_state.received_chunks.len() == metadata.total_chunks {
-            reassemble_file(transfer_state)?;
-            info!("File transfer completed: {}", metadata.file_name);
-            return Ok(true);
-        }
+    // Check if transfer is complete (only required chunks)
+    if transfer_state.is_transfer_complete() {
+        reassemble_file(transfer_state)?;
+        info!("File transfer completed: {:?}", transfer_state.metadata.as_ref().map(|m| &m.file_name));
+        return Ok(true);
     }
 
     Ok(false)
@@ -139,10 +186,10 @@ fn reassemble_file(transfer_state: &FileTransferState) -> Result<()> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("No metadata available"))?;
 
-    // Write to temporary file first, then rename (atomic write)
+    // For delta updates, need to blend old and new chunks
     let output_path = transfer_state.file_path.join(&metadata.file_name);
 
-    // ensure parent directory exists (handles nested relative paths)
+    // Ensure parent directory exists
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -152,12 +199,39 @@ fn reassemble_file(transfer_state: &FileTransferState) -> Result<()> {
     {
         let mut file = std::fs::File::create(&temp_path)?;
 
+        // If this is a delta update, read existing chunks not in required_chunks
+        let existing_chunks = if !transfer_state.required_chunks.is_empty() 
+            && transfer_state.required_chunks.len() < metadata.total_chunks {
+            // Partial update: read existing file to get unchanged chunks
+            if output_path.exists() {
+                match chunk_file(&output_path) {
+                    Ok((chunks, _)) => {
+                        Some(chunks.iter().map(|c| (c.index, c.data.clone())).collect::<HashMap<_, _>>())
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Write chunks in order
         for i in 0..metadata.total_chunks {
-            if let Some(chunk_data) = transfer_state.received_chunks.get(&i) {
-                file.write_all(chunk_data)?;
+            let chunk_data = if let Some(data) = transfer_state.received_chunks.get(&i) {
+                data.clone()
+            } else if let Some(ref existing) = existing_chunks {
+                if let Some(data) = existing.get(&i) {
+                    data.clone()
+                } else {
+                    return Err(anyhow::anyhow!("Missing chunk {} and no existing data", i));
+                }
             } else {
                 return Err(anyhow::anyhow!("Missing chunk {}", i));
-            }
+            };
+
+            file.write_all(&chunk_data)?;
         }
 
         file.sync_all()?;
@@ -191,3 +265,4 @@ pub fn delete_file(sync_path: &PathBuf, file_name: &str) -> Result<()> {
 
     Ok(())
 }
+

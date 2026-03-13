@@ -19,6 +19,19 @@ pub enum SyncMessage {
         chunk_hashes: Vec<[u8; 32]>,
     },
 
+    /// Extended metadata with version and delta info
+    VersionedMetadata {
+        file_name: String,
+        file_hash: [u8; 32],
+        parent_hash: Option<[u8; 32]>,
+        total_chunks: usize,
+        file_size: u64,
+        chunk_hashes: Vec<[u8; 32]>,
+        changed_chunks: Vec<usize>,
+        timestamp: u64,
+        author: String,
+    },
+
     ChunkRequest {
         file_name: String,
         chunk_index: usize,
@@ -33,6 +46,14 @@ pub enum SyncMessage {
 
     FileChanged {
         file_name: String,
+    },
+
+    /// File changed with version info for efficient delta detection
+    FileChangedWithVersion {
+        file_name: String,
+        file_hash: [u8; 32],
+        changed_chunk_count: usize,
+        timestamp: u64,
     },
 
     FileDeleted {
