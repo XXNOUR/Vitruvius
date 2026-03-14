@@ -42,8 +42,11 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     println!("\n--- Vitruvius Node ---");
     println!("YOUR ID: {}", peer_id_str);
 
+    // Create command channel for GUI commands
+    let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+
     // Initialize WebSocket server for GUI
-    let (ws_server, event_tx) = WsServer::new();
+    let (ws_server, event_tx) = WsServer::new(command_tx);
     let ws_server = std::sync::Arc::new(ws_server);
 
     // Send identity to GUI clients
@@ -722,6 +725,149 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                         }
                     }
                     _ => {}
+                }
+            }
+
+            Some(cmd) = command_rx.recv() => {
+                match cmd {
+                    crate::ws::GuiCommand::DialPeer { peer_id } => {
+                        info!("GUI requested dial to peer: {}", peer_id);
+                        // Parse the peer_id string to libp2p PeerId
+                        match peer_id.parse::<libp2p::PeerId>() {
+                            Ok(peer_id_parsed) => {
+                                info!("Dialing peer {}", peer_id_parsed);
+                                // The actual dial will be initiated by the swarm's autodial or through connections
+                                // For now, request-response messaging will trigger a connection attempt
+                                swarm.behaviour_mut().rr.send_request(
+                                    &peer_id_parsed,
+                                    SyncMessage::ListFiles,
+                                );
+                            }
+                            Err(e) => {
+                                warn!("Invalid peer ID format: {} - {}", peer_id, e);
+                                event_tx.send(GuiEvent::Error {
+                                    message: format!("Invalid peer ID: {}", peer_id),
+                                }).ok();
+                            }
+                        }
+                    }
+
+                    crate::ws::GuiCommand::DialAddr { addr } => {
+                        info!("GUI requested dial to address: {}", addr);
+                        // Parse the multiaddr and extract peer ID if present
+                        match addr.parse::<libp2p::multiaddr::Multiaddr>() {
+                            Ok(multiaddr) => {
+                                info!("Dialing address {}", multiaddr);
+                                // Dial the multiaddr directly
+                                match swarm.dial(multiaddr.clone()) {
+                                    Ok(_) => {
+                                        info!("Dial initiated to {}", multiaddr);
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to dial {}: {:?}", multiaddr, e);
+                                        event_tx.send(GuiEvent::Error {
+                                            message: format!("Failed to dial address: {}", e),
+                                        }).ok();
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Invalid multiaddr format: {} - {}", addr, e);
+                                event_tx.send(GuiEvent::Error {
+                                    message: format!("Invalid address format: {}", addr),
+                                }).ok();
+                            }
+                        }
+                    }
+
+                    crate::ws::GuiCommand::SetFolder { path } => {
+                        info!("GUI requested to set sync folder: {}", path);
+                        // Note: In a full implementation, you'd update the sync folder
+                        // For now, just log it
+                        event_tx.send(GuiEvent::Log {
+                            level: "info".to_string(),
+                            message: format!("Sync folder set to: {}", path),
+                        }).ok();
+                    }
+
+                    crate::ws::GuiCommand::RequestSync { peer_id } => {
+                        info!("GUI requested sync from peer: {}", peer_id);
+                        match peer_id.parse::<libp2p::PeerId>() {
+                            Ok(peer_id_parsed) => {
+                                // Request file list from peer
+                                swarm.behaviour_mut().rr.send_request(
+                                    &peer_id_parsed,
+                                    SyncMessage::ListFiles,
+                                );
+                            }
+                            Err(e) => {
+                                warn!("Invalid peer ID: {} - {}", peer_id, e);
+                                event_tx.send(GuiEvent::Error {
+                                    message: format!("Invalid peer ID: {}", peer_id),
+                                }).ok();
+                            }
+                        }
+                    }
+
+                    crate::ws::GuiCommand::GetFileList => {
+                        info!("GUI requested file list");
+                        match get_file_list(&sync_path_abs).await {
+                            Ok(file_names) => {
+                                let files: Vec<crate::ws::FileInfo> = file_names.iter().map(|name| {
+                                    // Try to get file size
+                                    let size = sync_path_abs.join(&name)
+                                        .metadata()
+                                        .ok()
+                                        .map(|m| m.len())
+                                        .unwrap_or(0);
+                                    crate::ws::FileInfo {
+                                        name: name.clone(),
+                                        size,
+                                    }
+                                }).collect();
+                                
+                                event_tx.send(GuiEvent::FileList { files }).ok();
+                            }
+                            Err(e) => {
+                                warn!("Failed to get file list: {}", e);
+                                event_tx.send(GuiEvent::Error {
+                                    message: format!("Failed to get file list: {}", e),
+                                }).ok();
+                            }
+                        }
+                    }
+
+                    crate::ws::GuiCommand::GetFileHistory { file_name } => {
+                        info!("GUI requested file history for: {}", file_name);
+                        // Get file history
+                        if let Some(version) = local_file_versions.get(&file_name) {
+                            let info = file_version_to_info(version);
+                            event_tx.send(GuiEvent::FileHistory {
+                                file_name,
+                                versions: vec![info],
+                            }).ok();
+                        } else {
+                            event_tx.send(GuiEvent::Error {
+                                message: format!("No history for file: {}", file_name),
+                            }).ok();
+                        }
+                    }
+
+                    crate::ws::GuiCommand::Disconnect { peer_id } => {
+                        info!("GUI requested disconnect from peer: {}", peer_id);
+                        match peer_id.parse::<libp2p::PeerId>() {
+                            Ok(peer_id_parsed) => {
+                                // Remove from connected peers
+                                sync_state.connected_peers.retain(|p| p != &peer_id_parsed);
+                                event_tx.send(GuiEvent::PeerDisconnected {
+                                    peer_id,
+                                }).ok();
+                            }
+                            Err(e) => {
+                                warn!("Invalid peer ID: {} - {}", peer_id, e);
+                            }
+                        }
+                    }
                 }
             }
 

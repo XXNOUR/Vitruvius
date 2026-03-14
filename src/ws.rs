@@ -90,16 +90,18 @@ pub struct FileVersionInfo {
 pub struct WsServer {
     clients: Arc<RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<Message>>>>,
     event_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<GuiEvent>>>,
+    command_tx: mpsc::UnboundedSender<GuiCommand>,
 }
 
 impl WsServer {
-    pub fn new() -> (Self, mpsc::UnboundedSender<GuiEvent>) {
+    pub fn new(command_tx: mpsc::UnboundedSender<GuiCommand>) -> (Self, mpsc::UnboundedSender<GuiEvent>) {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         (
             WsServer {
                 clients: Arc::new(RwLock::new(HashMap::new())),
                 event_rx: Arc::new(tokio::sync::Mutex::new(event_rx)),
+                command_tx,
             },
             event_tx,
         )
@@ -111,6 +113,7 @@ impl WsServer {
 
         let clients = self.clients.clone();
         let event_rx = self.event_rx.clone();
+        let command_tx = self.command_tx.clone();
 
         // Spawn event broadcaster task
         let clients_broadcast = clients.clone();
@@ -139,9 +142,10 @@ impl WsServer {
         loop {
             let (stream, addr) = listener.accept().await?;
             let clients = clients.clone();
+            let command_tx = command_tx.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_ws_connection(stream, addr, clients).await {
+                if let Err(e) = handle_ws_connection(stream, addr, clients, command_tx).await {
                     warn!("WebSocket error: {}", e);
                 }
             });
@@ -153,6 +157,7 @@ async fn handle_ws_connection(
     stream: tokio::net::TcpStream,
     addr: std::net::SocketAddr,
     clients: Arc<RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<Message>>>>,
+    command_tx: mpsc::UnboundedSender<GuiCommand>,
 ) -> Result<()> {
     let ws_stream = tokio_tungstenite::accept_async(stream).await?;
     let client_id = format!("{}", addr);
@@ -175,9 +180,12 @@ async fn handle_ws_connection(
             match msg {
                 Ok(Message::Text(text)) => {
                     if let Ok(cmd) = serde_json::from_str::<GuiCommand>(&text) {
-                        // Command received - would be processed by main app loop
-                        // For now, just log it
-                        info!("GUI command: {:?}", cmd);
+                        info!("GUI command received: {:?}", cmd);
+                        // Forward to app command handler
+                        if let Err(_) = command_tx.send(cmd) {
+                            warn!("Failed to send command to app - app channel closed");
+                            break;
+                        }
                     }
                 }
                 Ok(Message::Close(_)) => break,
