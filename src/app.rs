@@ -3,7 +3,7 @@ use crate::storage::{
     get_file_list, get_versioned_metadata, process_received_chunk, FileTransferState, FileVersion,
 };
 use crate::sync::SyncState;
-use crate::ws::{GuiEvent, WsServer};
+use crate::ws::{GuiEvent, FileVersionInfo, WsServer};
 use anyhow::Result;
 use libp2p::{futures::StreamExt, mdns, request_response, swarm::SwarmEvent};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
@@ -16,6 +16,20 @@ use tracing::{error, info, warn};
 
 const MAX_CONCURRENT_FILES: usize = 3;
 const MAX_CONCURRENT_CHUNKS: usize = 8;
+
+/// Convert a FileVersion to FileVersionInfo for GUI display
+fn file_version_to_info(version: &FileVersion) -> FileVersionInfo {
+    let file_hash_hex = format!("{:x}", 
+        u128::from_le_bytes(version.file_hash[..16].try_into().unwrap_or([0u8; 16])));
+    
+    FileVersionInfo {
+        file_hash: file_hash_hex[..16.min(file_hash_hex.len())].to_string(),
+        timestamp: version.timestamp,
+        author: version.author.clone(),
+        changed_chunks: version.changed_chunks.len(),
+        total_chunks: version.metadata.total_chunks,
+    }
+}
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt::init();
@@ -478,7 +492,15 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
                                                             // Update local version tracking
                                                             if let Some(version) = transfer_needed.current_version.clone() {
-                                                                local_file_versions.insert(file_name.clone(), version);
+                                                                local_file_versions.insert(file_name.clone(), version.clone());
+                                                                
+                                                                // Send file history to GUI
+                                                                let version_info = file_version_to_info(&version);
+                                                                let all_versions: Vec<FileVersionInfo> = vec![version_info];
+                                                                event_tx.send(GuiEvent::FileHistory {
+                                                                    file_name: file_name.clone(),
+                                                                    versions: all_versions,
+                                                                }).ok();
                                                             }
 
                                                             sync_state.transfer_states.remove(&file_name);

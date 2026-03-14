@@ -24,6 +24,8 @@ pub enum GuiCommand {
     RequestSync { peer_id: String },
     #[serde(rename = "GetFileList")]
     GetFileList,
+    #[serde(rename = "GetFileHistory")]
+    GetFileHistory { file_name: String },
 }
 
 /// Messages from the backend to the GUI
@@ -56,6 +58,8 @@ pub enum GuiEvent {
     TransferComplete { peer_id: String, file_name: String },
     #[serde(rename = "FileList")]
     FileList { files: Vec<FileInfo> },
+    #[serde(rename = "FileHistory")]
+    FileHistory { file_name: String, versions: Vec<FileVersionInfo> },
     #[serde(rename = "Log")]
     Log { level: String, message: String },
     #[serde(rename = "Error")]
@@ -66,6 +70,21 @@ pub enum GuiEvent {
 pub struct FileInfo {
     pub name: String,
     pub size: u64,
+}
+
+/// Information about a single version of a file for display in GUI
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileVersionInfo {
+    /// Hex-encoded file hash (first 16 chars for display)
+    pub file_hash: String,
+    /// Timestamp when version was created (unix seconds)
+    pub timestamp: u64,
+    /// Author/peer that created this version
+    pub author: String,
+    /// Number of chunks that changed from parent
+    pub changed_chunks: usize,
+    /// Total chunks in this version
+    pub total_chunks: usize,
 }
 
 pub struct WsServer {

@@ -751,6 +751,22 @@ canvas#bwChart{width:100%;height:85px;display:block}
   </div>
 </div>
 
+<!-- ═══ MODAL: FILE HISTORY ═══════════════════════════════ -->
+<div class="modal-overlay" id="mFileHistory">
+  <div class="modal">
+    <div class="mh">
+      <span class="mh-title" id="fh-fileName">File History</span>
+      <button class="mh-close" onclick="closeModal('mFileHistory')">✕</button>
+    </div>
+    <div style="flex:1;overflow-y:auto;max-height:400px;border-bottom:1px solid var(--border)" id="fh-content">
+      <div class="empty-state"><span>Loading…</span></div>
+    </div>
+    <div class="mf">
+      <button class="btn btn-neutral" onclick="closeModal('mFileHistory')">CLOSE</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ═══════════════════════════════════════════════════════
 // STATE
@@ -765,6 +781,7 @@ const STATE = {
   queue: [],           // [{fileName, peerId, total, done, ext}]
   syncFolder: null,
   localFiles: [],      // [{name, size}]
+  fileHistory: {},     // file_name → [{file_hash, timestamp, author, changed_chunks, total_chunks}]
   totalRxBytes: 0,
   chunksRx: 0,
   chunksTx: 0,
@@ -964,6 +981,11 @@ function handleMessage(msg) {
 
     case 'FileList':
       STATE.localFiles = msg.files || [];
+      renderFiles();
+      break;
+
+    case 'FileHistory':
+      STATE.fileHistory[msg.file_name] = msg.versions || [];
       renderFiles();
       break;
 
@@ -1173,10 +1195,13 @@ function renderFiles() {
         ? (f.size / 1024).toFixed(0) + ' KB'
         : f.size + ' B';
 
+    const hasHistory = STATE.fileHistory[f.name] && STATE.fileHistory[f.name].length > 0;
+    const historyBadge = hasHistory ? `<span style="font-size:8px;color:var(--accent);font-weight:700;margin-left:4px">${STATE.fileHistory[f.name].length}v</span>` : '';
+
     return `
-      <div class="file-row">
+      <div class="file-row" onclick="showFileHistory('${f.name}')">
         <div class="file-icon">📄</div>
-        <div class="fi-name">${f.name}</div>
+        <div class="fi-name">${f.name}${historyBadge}</div>
         <div class="fi-size">${sizeMB}</div>
         <div class="fi-status ok" title="Ready"></div>
       </div>
@@ -1286,6 +1311,52 @@ function browseFolder(inputId = 'm_folder') {
   } else {
     notification('File explorer not supported in your browser', 'warn');
   }
+}
+
+function showFileHistory(fileName) {
+  const versions = STATE.fileHistory[fileName] || [];
+  const modal = document.getElementById('mFileHistory');
+  const titleEl = document.getElementById('fh-fileName');
+  const contentEl = document.getElementById('fh-content');
+  
+  titleEl.textContent = fileName;
+  
+  if (versions.length === 0) {
+    contentEl.innerHTML = '<div class="empty-state" style="padding:30px;"><div style="font-size:10px">No version history yet</div></div>';
+  } else {
+    contentEl.innerHTML = `
+      <div style="padding:12px;display:flex;flex-direction:column;gap:8px">
+        ${versions.map((v, i) => `
+          <div style="padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:3px">
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+              <span style="font-weight:600;font-size:10px;color:var(--accent)">Version ${versions.length - i}</span>
+              <span style="font-family:var(--mono);font-size:8px;color:var(--text3)">${new Date(v.timestamp * 1000).toLocaleString()}</span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:6px;font-family:var(--mono);font-size:9px">
+              <div>
+                <span style="color:var(--text3);font-size:8px;text-transform:uppercase">Hash</span>
+                <div style="color:var(--text2);word-break:break-all">${v.file_hash}</div>
+              </div>
+              <div>
+                <span style="color:var(--text3);font-size:8px;text-transform:uppercase">Author</span>
+                <div style="color:var(--text2);word-break:break-all">${v.author}</div>
+              </div>
+              <div>
+                <span style="color:var(--text3);font-size:8px;text-transform:uppercase">Changed Chunks</span>
+                <div style="color:var(--accent)">${v.changed_chunks}/${v.total_chunks}</div>
+              </div>
+              <div>
+                <span style="color:var(--text3);font-size:8px;text-transform:uppercase">File Size</span>
+                <div style="color:var(--text2)">${((v.total_chunks * 524288) / (1024 * 1024)).toFixed(1)} MB</div>
+              </div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
+  
+  openModal('mFileHistory');
 }
 
 function clearPeerInputs() {
