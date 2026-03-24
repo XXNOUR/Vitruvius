@@ -30,53 +30,55 @@ pub const CHUNK_SIZE: u64 = 512 * 1024; // 512 KB
 #[derive(Debug, Clone)]
 pub struct FileMetadata {
     /// Relative path from the sync root, using forward slashes, e.g. "photos/img.jpg"
-    pub file_name:    String,
+    pub file_name: String,
     pub total_chunks: usize,
-    pub file_size:    u64,
+    pub file_size: u64,
     pub chunk_hashes: Vec<[u8; 32]>,
 }
 
 // ─── State for one in-progress incoming transfer ──────────────────────────────
 pub struct FileTransferState {
-    pub metadata:        Option<FileMetadata>,
+    pub metadata: Option<FileMetadata>,
     pub received_chunks: HashMap<usize, Vec<u8>>,
-    pub sync_dir:        PathBuf,  // the sync root (not the file's parent)
-    pub next_request:    usize,
-    pub last_activity:   Instant,
+    pub sync_dir: PathBuf, // the sync root (not the file's parent)
+    pub next_request: usize,
+    pub last_activity: Instant,
 }
 
 impl FileTransferState {
     pub fn new(sync_dir: PathBuf) -> Self {
         Self {
-            metadata:        None,
+            metadata: None,
             received_chunks: HashMap::new(),
             sync_dir,
-            next_request:    0,
-            last_activity:   Instant::now(),
+            next_request: 0,
+            last_activity: Instant::now(),
         }
     }
 
     pub fn missing_chunks(&self) -> Vec<usize> {
         let total = self.metadata.as_ref().map(|m| m.total_chunks).unwrap_or(0);
-        (0..total).filter(|i| !self.received_chunks.contains_key(i)).collect()
+        (0..total)
+            .filter(|i| !self.received_chunks.contains_key(i))
+            .collect()
     }
 }
 
 // ─── Pending file (queued, not yet downloading) ───────────────────────────────
 #[derive(Debug, Clone)]
 pub struct PendingFile {
-    pub file_name:    String,  // relative path
+    pub file_name: String, // relative path
     pub total_chunks: usize,
-    pub file_size:    u64,
+    pub file_size: u64,
     pub chunk_hashes: Vec<[u8; 32]>,
 }
 
 impl From<&FileEntry> for PendingFile {
     fn from(fe: &FileEntry) -> Self {
         PendingFile {
-            file_name:    fe.file_name.clone(),
+            file_name: fe.file_name.clone(),
             total_chunks: fe.total_chunks,
-            file_size:    fe.file_size,
+            file_size: fe.file_size,
             chunk_hashes: fe.chunk_hashes.clone(),
         }
     }
@@ -89,11 +91,16 @@ impl From<&FileEntry> for PendingFile {
 fn relative_path(root: &Path, path: &Path) -> Option<String> {
     path.strip_prefix(root).ok().and_then(|rel| {
         // Convert to forward-slash string regardless of OS
-        let s = rel.components()
+        let s = rel
+            .components()
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join("/");
-        if s.is_empty() { None } else { Some(s) }
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     })
 }
 
@@ -102,8 +109,7 @@ fn compute_file_metadata(root: &Path, abs_path: &Path) -> Result<FileMetadata> {
     let file_name = relative_path(root, abs_path)
         .ok_or_else(|| anyhow::anyhow!("Cannot make relative path for {:?}", abs_path))?;
 
-    let mut file = File::open(abs_path)
-        .with_context(|| format!("Cannot open {:?}", abs_path))?;
+    let mut file = File::open(abs_path).with_context(|| format!("Cannot open {:?}", abs_path))?;
     let file_size = file.metadata()?.len();
 
     let total_chunks = ((file_size + CHUNK_SIZE - 1) / CHUNK_SIZE).max(1) as usize;
@@ -111,17 +117,27 @@ fn compute_file_metadata(root: &Path, abs_path: &Path) -> Result<FileMetadata> {
     let mut buf = vec![0u8; CHUNK_SIZE as usize];
     for _ in 0..total_chunks {
         let n = file.read(&mut buf)?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         chunk_hashes.push(blake3::hash(&buf[..n]).into());
     }
-    Ok(FileMetadata { file_name, total_chunks, file_size, chunk_hashes })
+    Ok(FileMetadata {
+        file_name,
+        total_chunks,
+        file_size,
+        chunk_hashes,
+    })
 }
 
 // ─── Recursively walk a directory tree ────────────────────────────────────────
 fn walk_dir(root: &Path, dir: &Path, results: &mut Vec<FileMetadata>) {
     let entries = match fs::read_dir(dir) {
-        Ok(e)  => e,
-        Err(e) => { error!("Cannot read dir {:?}: {}", dir, e); return; }
+        Ok(e) => e,
+        Err(e) => {
+            error!("Cannot read dir {:?}: {}", dir, e);
+            return;
+        }
     };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -129,7 +145,7 @@ fn walk_dir(root: &Path, dir: &Path, results: &mut Vec<FileMetadata>) {
             walk_dir(root, &path, results);
         } else if path.is_file() {
             match compute_file_metadata(root, &path) {
-                Ok(m)  => results.push(m),
+                Ok(m) => results.push(m),
                 Err(e) => error!("Skipping {:?}: {}", path, e),
             }
         }
@@ -150,17 +166,27 @@ pub async fn get_manifest(sync_root: &PathBuf, node_name: &str) -> Result<SyncMe
     if files.is_empty() {
         return Ok(SyncMessage::Empty);
     }
-    let entries = files.into_iter().map(|m| FileEntry {
-        file_name:    m.file_name,   // relative path
-        file_size:    m.file_size,
-        total_chunks: m.total_chunks,
-        chunk_hashes: m.chunk_hashes,
-    }).collect();
-    Ok(SyncMessage::Manifest { node_name: node_name.to_string(), files: entries })
+    let entries = files
+        .into_iter()
+        .map(|m| FileEntry {
+            file_name: m.file_name, // relative path
+            file_size: m.file_size,
+            total_chunks: m.total_chunks,
+            chunk_hashes: m.chunk_hashes,
+        })
+        .collect();
+    Ok(SyncMessage::Manifest {
+        node_name: node_name.to_string(),
+        files: entries,
+    })
 }
 
 // ─── Serve one chunk (O(1) seek, relative path) ───────────────────────────────
-pub async fn get_chunk(sync_root: &PathBuf, rel_path: &str, chunk_index: usize) -> Result<SyncMessage> {
+pub async fn get_chunk(
+    sync_root: &PathBuf,
+    rel_path: &str,
+    chunk_index: usize,
+) -> Result<SyncMessage> {
     // Sanitise: reject any path that tries to escape the sync root
     if rel_path.contains("..") || rel_path.starts_with('/') {
         return Ok(SyncMessage::Error {
@@ -174,8 +200,8 @@ pub async fn get_chunk(sync_root: &PathBuf, rel_path: &str, chunk_index: usize) 
         file_path.push(component);
     }
 
-    let mut file = File::open(&file_path)
-        .with_context(|| format!("Cannot open {:?}", file_path))?;
+    let mut file =
+        File::open(&file_path).with_context(|| format!("Cannot open {:?}", file_path))?;
 
     let offset = chunk_index as u64 * CHUNK_SIZE;
     file.seek(SeekFrom::Start(offset))?;
@@ -205,7 +231,9 @@ pub fn verify_chunk(data: &[u8], expected: &[u8; 32]) -> bool {
 // ─── Reassemble file from all received chunks ─────────────────────────────────
 // Creates all necessary parent directories before writing.
 pub async fn reassemble(ts: &FileTransferState) -> Result<()> {
-    let meta = ts.metadata.as_ref()
+    let meta = ts
+        .metadata
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("No metadata during reassembly"))?;
 
     // Build the full output path from relative path (forward-slash separated)
@@ -216,35 +244,42 @@ pub async fn reassemble(ts: &FileTransferState) -> Result<()> {
 
     // Create parent directories (e.g. photos/ or src/utils/)
     if let Some(parent) = out_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Cannot create dirs {:?}", parent))?;
+        fs::create_dir_all(parent).with_context(|| format!("Cannot create dirs {:?}", parent))?;
     }
 
-    let mut out = File::create(&out_path)
-        .with_context(|| format!("Cannot create {:?}", out_path))?;
+    let mut out =
+        File::create(&out_path).with_context(|| format!("Cannot create {:?}", out_path))?;
 
     for i in 0..meta.total_chunks {
         match ts.received_chunks.get(&i) {
             Some(d) => out.write_all(d)?,
-            None    => return Err(anyhow::anyhow!("Missing chunk {} during reassembly of {}", i, meta.file_name)),
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Missing chunk {} during reassembly of {}",
+                    i,
+                    meta.file_name
+                ))
+            }
         }
     }
     out.sync_all()?;
-    info!("✅ Written: {:?}", out_path);
+    info!("Written: {:?}", out_path);
     Ok(())
 }
 
 // ─── Legacy wrapper ───────────────────────────────────────────────────────────
 #[allow(dead_code)]
 pub async fn process_chunk(
-    _peer_id:    PeerId,
+    _peer_id: PeerId,
     chunk_index: usize,
-    data:        Vec<u8>,
-    ts:          &mut FileTransferState,
+    data: Vec<u8>,
+    ts: &mut FileTransferState,
 ) -> Result<bool> {
     ts.received_chunks.insert(chunk_index, data);
     let total = ts.metadata.as_ref().map(|m| m.total_chunks).unwrap_or(0);
-    if ts.received_chunks.len() < total { return Ok(false); }
+    if ts.received_chunks.len() < total {
+        return Ok(false);
+    }
     reassemble(ts).await?;
     Ok(true)
 }
