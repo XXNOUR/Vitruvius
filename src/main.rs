@@ -1,7 +1,5 @@
-use Vitruv::app;
-use std::error::Error;
+use Vitruv::gui;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    app::run().await
+fn main() {
+    gui::run_gui();
 }
