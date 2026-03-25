@@ -37,13 +37,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use libp2p::{Multiaddr, PeerId, Swarm, mdns, request_response, swarm::SwarmEvent};
-use tokio::sync::{Mutex, mpsc};
+use libp2p::{mdns, request_response, swarm::SwarmEvent, Multiaddr, PeerId, Swarm};
+use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info, warn};
 
-use crate::gui::{GuiEvent, GuiFileInfo, GuiCommand};
+use crate::gui::{GuiCommand, GuiEvent, GuiFileInfo};
 use crate::network::{MyBehaviour, MyBehaviourEvent, SyncMessage};
-use crate::state::{AppState, short_id};
+use crate::state::{short_id, AppState};
 use crate::storage::{self, FileMetadata, FileTransferState, PendingFile};
 
 /// Chunks in-flight per active file.
@@ -63,12 +63,15 @@ const STALL_SECS: u64 = 20;
 // queue:  files waiting to start (no network traffic yet)
 pub struct PeerDownload {
     pub active: HashMap<String, FileTransferState>,
-    pub queue:  VecDeque<PendingFile>,
+    pub queue: VecDeque<PendingFile>,
 }
 
 impl PeerDownload {
     fn new() -> Self {
-        Self { active: HashMap::new(), queue: VecDeque::new() }
+        Self {
+            active: HashMap::new(),
+            queue: VecDeque::new(),
+        }
     }
 }
 
@@ -77,14 +80,13 @@ impl PeerDownload {
 // =============================================================================
 
 pub async fn on_command(
-    cmd:       GuiCommand,
-    swarm:     &mut Swarm<MyBehaviour>,
-    state:     Arc<Mutex<AppState>>,
-    event_tx:  &mpsc::UnboundedSender<GuiEvent>,
+    cmd: GuiCommand,
+    swarm: &mut Swarm<MyBehaviour>,
+    state: Arc<Mutex<AppState>>,
+    event_tx: &mpsc::UnboundedSender<GuiEvent>,
     node_name: &str,
 ) {
     match cmd {
-
         GuiCommand::SetFolder { path } => {
             let p = PathBuf::from(&path);
             if !p.exists() {
@@ -93,21 +95,33 @@ pub async fn on_command(
                 }
             }
             let abs = match fs::canonicalize(&p) {
-                Ok(a)  => a,
+                Ok(a) => a,
                 Err(e) => return log(event_tx, "ERROR", format!("Bad path: {e}")),
             };
 
             match storage::list_folder(&abs).await {
                 Ok(files) => {
-                    let listing: Vec<GuiFileInfo> = files.iter().map(|f| GuiFileInfo {
-                        name: f.file_name.clone(), size: f.file_size, chunks: f.total_chunks,
-                    }).collect();
+                    let listing: Vec<GuiFileInfo> = files
+                        .iter()
+                        .map(|f| GuiFileInfo {
+                            name: f.file_name.clone(),
+                            size: f.file_size,
+                            chunks: f.total_chunks,
+                        })
+                        .collect();
                     let count = listing.len();
                     let _ = event_tx.send(GuiEvent::FolderListing { files: listing });
-                    log(event_tx, "OK",
-                        format!("Sync folder set: {} ({count} file(s))", abs.display()));
+                    log(
+                        event_tx,
+                        "OK",
+                        format!("Sync folder set: {} ({count} file(s))", abs.display()),
+                    );
                 }
-                Err(e) => log(event_tx, "WARN", format!("Folder set but listing failed: {e}")),
+                Err(e) => log(
+                    event_tx,
+                    "WARN",
+                    format!("Folder set but listing failed: {e}"),
+                ),
             }
 
             let connected: Vec<PeerId> = {
@@ -121,41 +135,66 @@ pub async fn on_command(
                 let pid_str = peer.to_string();
                 state.lock().await.announced_to.insert(peer);
                 swarm.behaviour_mut().rr.send_request(
-                    &peer, SyncMessage::FolderAnnouncement { node_name: node_name.to_string() },
+                    &peer,
+                    SyncMessage::FolderAnnouncement {
+                        node_name: node_name.to_string(),
+                    },
                 );
-                swarm.behaviour_mut().rr.send_request(
-                    &peer, SyncMessage::ManifestRequest,
+                swarm
+                    .behaviour_mut()
+                    .rr
+                    .send_request(&peer, SyncMessage::ManifestRequest);
+                log(
+                    event_tx,
+                    "INFO",
+                    format!(
+                        "Announced folder to {} and requested their manifest",
+                        short_id(&pid_str)
+                    ),
                 );
-                log(event_tx, "INFO",
-                    format!("Announced folder to {} and requested their manifest",
-                        short_id(&pid_str)));
             }
         }
 
         GuiCommand::DialPeer { peer_id, addr } => {
             let addr_str = addr.or_else(|| {
-                state.try_lock().ok().and_then(|s| s.known_addrs.get(&peer_id).cloned())
+                state
+                    .try_lock()
+                    .ok()
+                    .and_then(|s| s.known_addrs.get(&peer_id).cloned())
             });
             match addr_str {
-                None => log(event_tx, "WARN",
-                    format!("No address known for {}", short_id(&peer_id))),
+                None => log(
+                    event_tx,
+                    "WARN",
+                    format!("No address known for {}", short_id(&peer_id)),
+                ),
                 Some(a) => match a.parse::<Multiaddr>() {
                     Err(e) => log(event_tx, "ERROR", format!("Invalid multiaddr: {e}")),
                     Ok(ma) => {
-                        log(event_tx, "INFO", format!("Dialing {} …", short_id(&peer_id)));
+                        log(
+                            event_tx,
+                            "INFO",
+                            format!("Dialing {} …", short_id(&peer_id)),
+                        );
                         if let Err(e) = swarm.dial(ma) {
                             log(event_tx, "ERROR", format!("Dial error: {e}"));
                         }
                     }
-                }
+                },
             }
         }
 
         GuiCommand::RequestSync { peer_id } => {
             if let Ok(pid) = peer_id.parse::<PeerId>() {
-                log(event_tx, "INFO",
-                    format!("Requesting manifest from {} …", short_id(&peer_id)));
-                swarm.behaviour_mut().rr.send_request(&pid, SyncMessage::ManifestRequest);
+                log(
+                    event_tx,
+                    "INFO",
+                    format!("Requesting manifest from {} …", short_id(&peer_id)),
+                );
+                swarm
+                    .behaviour_mut()
+                    .rr
+                    .send_request(&pid, SyncMessage::ManifestRequest);
             }
         }
 
@@ -172,32 +211,52 @@ pub async fn on_command(
 // =============================================================================
 
 pub async fn check_stalls(
-    swarm:     &mut Swarm<MyBehaviour>,
-    event_tx:  &mpsc::UnboundedSender<GuiEvent>,
+    swarm: &mut Swarm<MyBehaviour>,
+    event_tx: &mpsc::UnboundedSender<GuiEvent>,
     transfers: &mut HashMap<PeerId, PeerDownload>,
 ) {
     let timeout = Duration::from_secs(STALL_SECS);
 
     for (peer, dl) in transfers.iter_mut() {
         for (file_name, ts) in dl.active.iter_mut() {
-            if ts.last_activity.elapsed() < timeout { continue; }
-            if ts.metadata.is_none() { continue; }
+            if ts.last_activity.elapsed() < timeout {
+                continue;
+            }
+            if ts.metadata.is_none() {
+                continue;
+            }
 
             let missing = ts.missing_chunks();
-            if missing.is_empty() { continue; }
+            if missing.is_empty() {
+                continue;
+            }
 
             let total = ts.metadata.as_ref().map(|m| m.total_chunks).unwrap_or(0);
-            warn!("Stall: {} ({}/{}) — re-requesting {} chunks",
-                file_name, ts.received_chunks.len(), total, missing.len());
-            log(event_tx, "WARN",
-                format!("⚠ Stall on {file_name} — re-requesting {} chunks", missing.len()));
+            warn!(
+                "Stall: {} ({}/{}) — re-requesting {} chunks",
+                file_name,
+                ts.received_chunks.len(),
+                total,
+                missing.len()
+            );
+            log(
+                event_tx,
+                "WARN",
+                format!(
+                    "Stall on {file_name} — re-requesting {} chunks",
+                    missing.len()
+                ),
+            );
 
             // Re-request up to WINDOW missing chunks
             let to_req = missing.len().min(WINDOW);
             for &ci in missing.iter().take(to_req) {
                 swarm.behaviour_mut().rr.send_request(
                     peer,
-                    SyncMessage::ChunkRequest { file_name: file_name.clone(), chunk_index: ci },
+                    SyncMessage::ChunkRequest {
+                        file_name: file_name.clone(),
+                        chunk_index: ci,
+                    },
                 );
             }
             // Advance next_request past what we just re-requested
@@ -214,23 +273,28 @@ pub async fn check_stalls(
 // =============================================================================
 
 pub async fn on_swarm_event(
-    event:     SwarmEvent<MyBehaviourEvent>,
-    swarm:     &mut Swarm<MyBehaviour>,
-    state:     Arc<Mutex<AppState>>,
-    event_tx:  &mpsc::UnboundedSender<GuiEvent>,
+    event: SwarmEvent<MyBehaviourEvent>,
+    swarm: &mut Swarm<MyBehaviour>,
+    state: Arc<Mutex<AppState>>,
+    event_tx: &mpsc::UnboundedSender<GuiEvent>,
     transfers: &mut HashMap<PeerId, PeerDownload>,
 ) {
     match event {
-
         SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
             for (peer_id, addr) in list {
-                let pid_str  = peer_id.to_string();
+                let pid_str = peer_id.to_string();
                 let addr_str = addr.to_string();
-                state.lock().await.known_addrs.insert(pid_str.clone(), addr_str.clone());
+                state
+                    .lock()
+                    .await
+                    .known_addrs
+                    .insert(pid_str.clone(), addr_str.clone());
                 let display = peer_display_name(&state, &pid_str).await;
                 info!("mDNS: {} at {}", pid_str, addr_str);
                 let _ = event_tx.send(GuiEvent::PeerDiscovered {
-                    peer_id: pid_str, addr: addr_str, node_name: display,
+                    peer_id: pid_str,
+                    addr: addr_str,
+                    node_name: display,
                 });
             }
         }
@@ -248,7 +312,8 @@ pub async fn on_swarm_event(
 
             let display = peer_display_name(&state, &pid_str).await;
             let _ = event_tx.send(GuiEvent::PeerConnected {
-                peer_id: pid_str.clone(), node_name: display.clone(),
+                peer_id: pid_str.clone(),
+                node_name: display.clone(),
             });
             log(event_tx, "OK", format!("Connected to {display}"));
 
@@ -256,14 +321,21 @@ pub async fn on_swarm_event(
             if have_folder {
                 state.lock().await.announced_to.insert(peer_id);
                 swarm.behaviour_mut().rr.send_request(
-                    &peer_id, SyncMessage::FolderAnnouncement { node_name: my_name },
+                    &peer_id,
+                    SyncMessage::FolderAnnouncement { node_name: my_name },
                 );
-                swarm.behaviour_mut().rr.send_request(
-                    &peer_id, SyncMessage::ManifestRequest,
+                swarm
+                    .behaviour_mut()
+                    .rr
+                    .send_request(&peer_id, SyncMessage::ManifestRequest);
+                log(
+                    event_tx,
+                    "INFO",
+                    format!(
+                        "Folder already set — announced to {} and requesting their manifest",
+                        short_id(&pid_str)
+                    ),
                 );
-                log(event_tx, "INFO",
-                    format!("Folder already set — announced to {} and requesting their manifest",
-                        short_id(&pid_str)));
             }
         }
 
@@ -278,20 +350,28 @@ pub async fn on_swarm_event(
             transfers.remove(&peer_id);
             let reason = cause.map(|e| e.to_string()).unwrap_or_default();
             warn!("Closed: {} — {}", pid_str, reason);
-            let _ = event_tx.send(GuiEvent::PeerDisconnected { peer_id: pid_str.clone() });
-            log(event_tx, "WARN",
-                format!("Disconnected from {} ({reason})", short_id(&pid_str)));
+            let _ = event_tx.send(GuiEvent::PeerDisconnected {
+                peer_id: pid_str.clone(),
+            });
+            log(
+                event_tx,
+                "WARN",
+                format!("Disconnected from {} ({reason})", short_id(&pid_str)),
+            );
         }
 
-        SwarmEvent::Behaviour(MyBehaviourEvent::Rr(
-            request_response::Event::Message { peer, message }
-        )) => {
+        SwarmEvent::Behaviour(MyBehaviourEvent::Rr(request_response::Event::Message {
+            peer,
+            message,
+        })) => {
             let pid_str = peer.to_string();
             match message {
-                request_response::Message::Request { channel, request, .. } =>
-                    on_request(request, channel, peer, &pid_str, swarm, &state, event_tx).await,
-                request_response::Message::Response { response, .. } =>
-                    on_response(response, peer, &pid_str, swarm, &state, event_tx, transfers).await,
+                request_response::Message::Request {
+                    channel, request, ..
+                } => on_request(request, channel, peer, &pid_str, swarm, &state, event_tx).await,
+                request_response::Message::Response { response, .. } => {
+                    on_response(response, peer, &pid_str, swarm, &state, event_tx, transfers).await
+                }
             }
         }
 
@@ -299,7 +379,8 @@ pub async fn on_swarm_event(
             let pid_str = peer_id.map(|p| p.to_string());
             warn!("Dial failed {:?}: {}", pid_str, error);
             let _ = event_tx.send(GuiEvent::DialFailed {
-                peer_id: pid_str, error: error.to_string(),
+                peer_id: pid_str,
+                error: error.to_string(),
             });
         }
 
@@ -312,24 +393,38 @@ pub async fn on_swarm_event(
 // =============================================================================
 
 async fn on_request(
-    request:  SyncMessage,
-    channel:  request_response::ResponseChannel<SyncMessage>,
-    peer:     PeerId,
-    pid_str:  &str,
-    swarm:    &mut Swarm<MyBehaviour>,
-    state:    &Arc<Mutex<AppState>>,
+    request: SyncMessage,
+    channel: request_response::ResponseChannel<SyncMessage>,
+    peer: PeerId,
+    pid_str: &str,
+    swarm: &mut Swarm<MyBehaviour>,
+    state: &Arc<Mutex<AppState>>,
     event_tx: &mpsc::UnboundedSender<GuiEvent>,
 ) {
     match request {
-
-        SyncMessage::FolderAnnouncement { node_name: peer_name } => {
-            state.lock().await.peer_names.insert(pid_str.to_string(), peer_name.clone());
-            log(event_tx, "INFO",
-                format!("{peer_name} announced their folder — requesting their manifest …"));
+        SyncMessage::FolderAnnouncement {
+            node_name: peer_name,
+        } => {
+            state
+                .lock()
+                .await
+                .peer_names
+                .insert(pid_str.to_string(), peer_name.clone());
+            log(
+                event_tx,
+                "INFO",
+                format!("{peer_name} announced their folder — requesting their manifest …"),
+            );
             // ACK closes the RR channel without semantic meaning
-            let _ = swarm.behaviour_mut().rr.send_response(channel, SyncMessage::Ack);
+            let _ = swarm
+                .behaviour_mut()
+                .rr
+                .send_response(channel, SyncMessage::Ack);
             // Always request their manifest
-            swarm.behaviour_mut().rr.send_request(&peer, SyncMessage::ManifestRequest);
+            swarm
+                .behaviour_mut()
+                .rr
+                .send_request(&peer, SyncMessage::ManifestRequest);
             // Reply with our announcement ONLY if we haven't already — prevents ping-pong loop
             let (have_folder, my_name) = folder_status(state).await;
             if have_folder {
@@ -337,7 +432,8 @@ async fn on_request(
                 if !already {
                     state.lock().await.announced_to.insert(peer);
                     swarm.behaviour_mut().rr.send_request(
-                        &peer, SyncMessage::FolderAnnouncement { node_name: my_name },
+                        &peer,
+                        SyncMessage::FolderAnnouncement { node_name: my_name },
                     );
                 }
             }
@@ -350,34 +446,61 @@ async fn on_request(
             };
             match path {
                 None => {
-                    log(event_tx, "INFO",
-                        format!("{} requested manifest — no folder set yet", short_id(pid_str)));
-                    let _ = swarm.behaviour_mut().rr.send_response(channel, SyncMessage::Empty);
+                    log(
+                        event_tx,
+                        "INFO",
+                        format!(
+                            "{} requested manifest — no folder set yet",
+                            short_id(pid_str)
+                        ),
+                    );
+                    let _ = swarm
+                        .behaviour_mut()
+                        .rr
+                        .send_response(channel, SyncMessage::Empty);
                 }
                 Some(ref p) => {
-                    log(event_tx, "INFO",
-                        format!("{} requested our manifest", short_id(pid_str)));
-                    let resp: SyncMessage = storage::get_manifest(p, &my_name).await
-                        .unwrap_or_else(|e: anyhow::Error| SyncMessage::Error { message: e.to_string() });
+                    log(
+                        event_tx,
+                        "INFO",
+                        format!("{} requested our manifest", short_id(pid_str)),
+                    );
+                    let resp: SyncMessage = storage::get_manifest(p, &my_name)
+                        .await
+                        .unwrap_or_else(|e: anyhow::Error| SyncMessage::Error {
+                            message: e.to_string(),
+                        });
                     let _ = swarm.behaviour_mut().rr.send_response(channel, resp);
                 }
             }
         }
 
-        SyncMessage::ChunkRequest { ref file_name, chunk_index } => {
+        SyncMessage::ChunkRequest {
+            ref file_name,
+            chunk_index,
+        } => {
             let path = state.lock().await.sync_path.clone();
             match path {
                 None => {
                     let _ = swarm.behaviour_mut().rr.send_response(
-                        channel, SyncMessage::Error { message: "No sync folder".into() },
+                        channel,
+                        SyncMessage::Error {
+                            message: "No sync folder".into(),
+                        },
                     );
                 }
                 Some(ref p) => {
-                    let resp: SyncMessage = storage::get_chunk(p, file_name, chunk_index).await
-                        .unwrap_or_else(|e: anyhow::Error| SyncMessage::Error { message: e.to_string() });
+                    let resp: SyncMessage = storage::get_chunk(p, file_name, chunk_index)
+                        .await
+                        .unwrap_or_else(|e: anyhow::Error| SyncMessage::Error {
+                            message: e.to_string(),
+                        });
                     if matches!(resp, SyncMessage::ChunkResponse { .. }) {
-                        log(event_tx, "INFO",
-                            format!("-> {file_name} [{chunk_index}] to {}", short_id(pid_str)));
+                        log(
+                            event_tx,
+                            "INFO",
+                            format!("-> {file_name} [{chunk_index}] to {}", short_id(pid_str)),
+                        );
                     }
                     let _ = swarm.behaviour_mut().rr.send_response(channel, resp);
                 }
@@ -385,15 +508,24 @@ async fn on_request(
         }
 
         SyncMessage::TransferComplete { ref file_name } => {
-            log(event_tx, "OK",
-                format!("{} confirmed receipt of {file_name}", short_id(pid_str)));
+            log(
+                event_tx,
+                "OK",
+                format!("{} confirmed receipt of {file_name}", short_id(pid_str)),
+            );
             // ACK — not Empty — so the receiver doesn't think our folder is gone
-            let _ = swarm.behaviour_mut().rr.send_response(channel, SyncMessage::Ack);
+            let _ = swarm
+                .behaviour_mut()
+                .rr
+                .send_response(channel, SyncMessage::Ack);
         }
 
         _ => {
             let _ = swarm.behaviour_mut().rr.send_response(
-                channel, SyncMessage::Error { message: "Unexpected request type".into() },
+                channel,
+                SyncMessage::Error {
+                    message: "Unexpected request type".into(),
+                },
             );
         }
     }
@@ -404,33 +536,46 @@ async fn on_request(
 // =============================================================================
 
 async fn on_response(
-    response:  SyncMessage,
-    peer:      PeerId,
-    pid_str:   &str,
-    swarm:     &mut Swarm<MyBehaviour>,
-    state:     &Arc<Mutex<AppState>>,
-    event_tx:  &mpsc::UnboundedSender<GuiEvent>,
+    response: SyncMessage,
+    peer: PeerId,
+    pid_str: &str,
+    swarm: &mut Swarm<MyBehaviour>,
+    state: &Arc<Mutex<AppState>>,
+    event_tx: &mpsc::UnboundedSender<GuiEvent>,
     transfers: &mut HashMap<PeerId, PeerDownload>,
 ) {
     match response {
-
         // Pure protocol ACK — ignore completely
         SyncMessage::Ack => {}
 
         // ── Manifest received ─────────────────────────────────────────────────
-        SyncMessage::Manifest { node_name: peer_name, ref files } => {
-            state.lock().await.peer_names.insert(pid_str.to_string(), peer_name.clone());
+        SyncMessage::Manifest {
+            node_name: peer_name,
+            ref files,
+        } => {
+            state
+                .lock()
+                .await
+                .peer_names
+                .insert(pid_str.to_string(), peer_name.clone());
 
             if files.is_empty() {
-                log(event_tx, "INFO", format!("{peer_name} manifest returned no files"));
+                log(
+                    event_tx,
+                    "INFO",
+                    format!("{peer_name} manifest returned no files"),
+                );
                 return;
             }
 
             let sync_path = match state.lock().await.sync_path.clone() {
                 Some(p) => p,
                 None => {
-                    log(event_tx, "WARN",
-                        "Received manifest but no sync folder set — set one first!".into());
+                    log(
+                        event_tx,
+                        "WARN",
+                        "Received manifest but no sync folder set — set one first!".into(),
+                    );
                     return;
                 }
             };
@@ -441,10 +586,16 @@ async fn on_response(
             let mut newly_queued = 0usize;
             for fe in files {
                 // Skip if already on disk (relative path, may contain subdirs)
-                if rel_path_exists(&sync_path, &fe.file_name) { continue; }
+                if rel_path_exists(&sync_path, &fe.file_name) {
+                    continue;
+                }
                 // Skip if already active or queued
-                if dl.active.contains_key(&fe.file_name) { continue; }
-                if dl.queue.iter().any(|p| p.file_name == fe.file_name) { continue; }
+                if dl.active.contains_key(&fe.file_name) {
+                    continue;
+                }
+                if dl.queue.iter().any(|p| p.file_name == fe.file_name) {
+                    continue;
+                }
 
                 dl.queue.push_back(PendingFile::from(fe));
                 newly_queued += 1;
@@ -452,15 +603,24 @@ async fn on_response(
 
             let total_pending = dl.active.len() + dl.queue.len();
             if total_pending == 0 {
-                log(event_tx, "OK",
-                    format!("All files from {peer_name} already synced — nothing to do"));
+                log(
+                    event_tx,
+                    "OK",
+                    format!("All files from {peer_name} already synced — nothing to do"),
+                );
                 return;
             }
 
-            log(event_tx, "INFO",
-                format!("{peer_name}: {newly_queued} file(s) queued \
+            log(
+                event_tx,
+                "INFO",
+                format!(
+                    "{peer_name}: {newly_queued} file(s) queued \
                          ({} active, {} waiting)",
-                    dl.active.len(), dl.queue.len()));
+                    dl.active.len(),
+                    dl.queue.len()
+                ),
+            );
 
             // Start files up to the concurrency limit
             start_queued_files(peer, &sync_path, dl, swarm, event_tx, pid_str);
@@ -469,46 +629,69 @@ async fn on_response(
         // ── Empty: peer has no folder or no files ─────────────────────────────
         // This is only a response to ManifestRequest — do not confuse with Ack.
         SyncMessage::Empty => {
-            let _ = event_tx.send(GuiEvent::RemoteEmpty { peer_id: pid_str.to_string() });
-            log(event_tx, "INFO",
-                format!("{} has no sync folder set yet", short_id(pid_str)));
+            let _ = event_tx.send(GuiEvent::RemoteEmpty {
+                peer_id: pid_str.to_string(),
+            });
+            log(
+                event_tx,
+                "INFO",
+                format!("{} has no sync folder set yet", short_id(pid_str)),
+            );
         }
 
         // ── One chunk arrived ─────────────────────────────────────────────────
-        SyncMessage::ChunkResponse { ref file_name, chunk_index, ref data, hash: _ } => {
+        SyncMessage::ChunkResponse {
+            ref file_name,
+            chunk_index,
+            ref data,
+            hash: _,
+        } => {
             let sync_path = match state.lock().await.sync_path.clone() {
                 Some(p) => p,
-                None    => return,
+                None => return,
             };
 
             let dl = match transfers.get_mut(&peer) {
                 Some(d) => d,
-                None    => return,
+                None => return,
             };
 
             let ts = match dl.active.get_mut(file_name) {
                 Some(t) => t,
-                None    => return, // stray chunk after completion — ignore
+                None => return, // stray chunk after completion — ignore
             };
 
             // Verify against the hash from the Manifest (not the sender's claimed hash)
-            let expected: Option<[u8; 32]> = ts.metadata.as_ref()
+            let expected: Option<[u8; 32]> = ts
+                .metadata
+                .as_ref()
                 .and_then(|m| m.chunk_hashes.get(chunk_index))
                 .copied();
-            let verified = expected.map(|h| storage::verify_chunk(data, &h)).unwrap_or(false);
-            let total    = ts.metadata.as_ref().map(|m| m.total_chunks).unwrap_or(0);
+            let verified = expected
+                .map(|h| storage::verify_chunk(data, &h))
+                .unwrap_or(false);
+            let total = ts.metadata.as_ref().map(|m| m.total_chunks).unwrap_or(0);
 
             let _ = event_tx.send(GuiEvent::ChunkReceived {
-                peer_id: pid_str.to_string(), file_name: file_name.clone(),
-                chunk_index, total_chunks: total, verified,
+                peer_id: pid_str.to_string(),
+                file_name: file_name.clone(),
+                chunk_index,
+                total_chunks: total,
+                verified,
             });
 
             if !verified {
-                log(event_tx, "ERROR",
-                    format!("{file_name} chunk {chunk_index} hash mismatch — retrying"));
+                log(
+                    event_tx,
+                    "ERROR",
+                    format!("{file_name} chunk {chunk_index} hash mismatch — retrying"),
+                );
                 swarm.behaviour_mut().rr.send_request(
                     &peer,
-                    SyncMessage::ChunkRequest { file_name: file_name.clone(), chunk_index },
+                    SyncMessage::ChunkRequest {
+                        file_name: file_name.clone(),
+                        chunk_index,
+                    },
                 );
                 return;
             }
@@ -522,29 +705,39 @@ async fn on_response(
                 swarm.behaviour_mut().rr.send_request(
                     &peer,
                     SyncMessage::ChunkRequest {
-                        file_name:   file_name.clone(),
+                        file_name: file_name.clone(),
                         chunk_index: ts.next_request,
                     },
                 );
                 ts.next_request += 1;
             }
 
-            log(event_tx, "INFO", format!("{file_name}  {}/{total}", chunk_index + 1));
+            log(
+                event_tx,
+                "INFO",
+                format!("{file_name}  {}/{total}", chunk_index + 1),
+            );
 
             // Not done yet
-            if ts.received_chunks.len() < total { return; }
+            if ts.received_chunks.len() < total {
+                return;
+            }
 
             // ── All chunks received — reassemble ──────────────────────────────
             match storage::reassemble(ts).await {
                 Ok(()) => {
                     let fname = file_name.clone();
                     let _ = event_tx.send(GuiEvent::TransferComplete {
-                        peer_id: pid_str.to_string(), file_name: fname.clone(),
+                        peer_id: pid_str.to_string(),
+                        file_name: fname.clone(),
                     });
                     log(event_tx, "OK", format!("✅  {fname} saved to disk"));
                     // Notify the sender
                     swarm.behaviour_mut().rr.send_request(
-                        &peer, SyncMessage::TransferComplete { file_name: fname.clone() },
+                        &peer,
+                        SyncMessage::TransferComplete {
+                            file_name: fname.clone(),
+                        },
                     );
                     // Remove from active — must happen AFTER send_request above
                     dl.active.remove(&fname);
@@ -554,29 +747,49 @@ async fn on_response(
 
                     // Report queue status
                     if !dl.queue.is_empty() || !dl.active.is_empty() {
-                        log(event_tx, "INFO",
-                            format!("{} active download(s), {} in queue",
-                                dl.active.len(), dl.queue.len()));
+                        log(
+                            event_tx,
+                            "INFO",
+                            format!(
+                                "{} active download(s), {} in queue",
+                                dl.active.len(),
+                                dl.queue.len()
+                            ),
+                        );
                     } else {
-                        log(event_tx, "OK",
-                            format!("All downloads from {} complete!", short_id(pid_str)));
+                        log(
+                            event_tx,
+                            "OK",
+                            format!("All downloads from {} complete!", short_id(pid_str)),
+                        );
                     }
                 }
                 Err(e) => {
                     error!("Reassembly error for {file_name}: {e}");
-                    log(event_tx, "ERROR", format!("Failed to write {file_name}: {e}"));
+                    log(
+                        event_tx,
+                        "ERROR",
+                        format!("Failed to write {file_name}: {e}"),
+                    );
                 }
             }
         }
 
         SyncMessage::Error { message } => {
             let _ = event_tx.send(GuiEvent::PeerError {
-                peer_id: pid_str.to_string(), message: message.clone(),
+                peer_id: pid_str.to_string(),
+                message: message.clone(),
             });
-            log(event_tx, "ERROR", format!("Error from {}: {message}", short_id(pid_str)));
+            log(
+                event_tx,
+                "ERROR",
+                format!("Error from {}: {message}", short_id(pid_str)),
+            );
         }
 
-        _ => { warn!("Unexpected response from {}", pid_str); }
+        _ => {
+            warn!("Unexpected response from {}", pid_str);
+        }
     }
 }
 
@@ -585,41 +798,53 @@ async fn on_response(
 // =============================================================================
 
 fn start_queued_files(
-    peer:      PeerId,
+    peer: PeerId,
     sync_path: &PathBuf,
-    dl:        &mut PeerDownload,
-    swarm:     &mut Swarm<MyBehaviour>,
-    event_tx:  &mpsc::UnboundedSender<GuiEvent>,
-    pid_str:   &str,
+    dl: &mut PeerDownload,
+    swarm: &mut Swarm<MyBehaviour>,
+    event_tx: &mpsc::UnboundedSender<GuiEvent>,
+    pid_str: &str,
 ) {
     while dl.active.len() < MAX_CONCURRENT_FILES {
         let pf = match dl.queue.pop_front() {
             Some(f) => f,
-            None    => break, // queue empty
+            None => break, // queue empty
         };
 
         // Double-check it didn't appear on disk while queued
         // Use component-based join to handle forward-slash relative paths correctly
         if rel_path_exists(sync_path, &pf.file_name) {
-            log(event_tx, "INFO", format!("{} appeared on disk — skipping", pf.file_name));
+            log(
+                event_tx,
+                "INFO",
+                format!("{} appeared on disk — skipping", pf.file_name),
+            );
             continue;
         }
 
-        log(event_tx, "INFO",
-            format!("⬇  {} — {} chunks, {} KB", pf.file_name, pf.total_chunks, pf.file_size / 1024));
+        log(
+            event_tx,
+            "INFO",
+            format!(
+                "⬇  {} — {} chunks, {} KB",
+                pf.file_name,
+                pf.total_chunks,
+                pf.file_size / 1024
+            ),
+        );
 
         let _ = event_tx.send(GuiEvent::TransferStarted {
-            peer_id:      pid_str.to_string(),
-            file_name:    pf.file_name.clone(),
+            peer_id: pid_str.to_string(),
+            file_name: pf.file_name.clone(),
             total_chunks: pf.total_chunks,
-            file_size:    pf.file_size,
+            file_size: pf.file_size,
         });
 
         let mut ts = FileTransferState::new(sync_path.clone());
         ts.metadata = Some(FileMetadata {
-            file_name:    pf.file_name.clone(),
+            file_name: pf.file_name.clone(),
             total_chunks: pf.total_chunks,
-            file_size:    pf.file_size,
+            file_size: pf.file_size,
             chunk_hashes: pf.chunk_hashes.clone(),
         });
 
@@ -629,7 +854,7 @@ fn start_queued_files(
             swarm.behaviour_mut().rr.send_request(
                 &peer,
                 SyncMessage::ChunkRequest {
-                    file_name:   pf.file_name.clone(),
+                    file_name: pf.file_name.clone(),
                     chunk_index: c,
                 },
             );
@@ -654,7 +879,10 @@ fn rel_path_exists(sync_root: &std::path::PathBuf, rel: &str) -> bool {
 }
 
 fn log(tx: &mpsc::UnboundedSender<GuiEvent>, level: &str, message: String) {
-    let _ = tx.send(GuiEvent::Log { level: level.into(), message });
+    let _ = tx.send(GuiEvent::Log {
+        level: level.into(),
+        message,
+    });
 }
 
 async fn folder_status(state: &Arc<Mutex<AppState>>) -> (bool, String) {
@@ -664,6 +892,8 @@ async fn folder_status(state: &Arc<Mutex<AppState>>) -> (bool, String) {
 
 async fn peer_display_name(state: &Arc<Mutex<AppState>>, pid_str: &str) -> String {
     let st = state.lock().await;
-    st.peer_names.get(pid_str).cloned()
+    st.peer_names
+        .get(pid_str)
+        .cloned()
         .unwrap_or_else(|| format!("Node-{}", short_id(pid_str)))
 }
