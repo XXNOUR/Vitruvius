@@ -5,6 +5,8 @@
 //   GuiEvent    — backend → browser  (state updates, log lines, transfer progress)
 //   GuiFileInfo — one row in a FolderListing
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 // ─── Browser → Backend ────────────────────────────────────────────────────────
@@ -13,13 +15,16 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type")]
 pub enum GuiCommand {
     /// Set (or change) the local sync folder
-    SetFolder   { path: String },
+    SetFolder { path: String },
     /// Dial a peer — addr is optional when mDNS already knows it
-    DialPeer    { peer_id: String, addr: Option<String> },
+    DialPeer {
+        peer_id: String,
+        addr: Option<String>,
+    },
     /// Manually request the file list from a connected peer
     RequestSync { peer_id: String },
     /// Close the connection to a peer
-    Disconnect  { peer_id: String },
+    Disconnect { peer_id: String },
 }
 
 // ─── Backend → Browser ────────────────────────────────────────────────────────
@@ -28,36 +33,55 @@ pub enum GuiCommand {
 #[serde(tag = "type")]
 pub enum GuiEvent {
     /// Sent once on startup — this node's own identity
-    Identity         { peer_id: String, node_name: String },
+    Identity { peer_id: String, node_name: String },
     /// A peer appeared on the LAN (mDNS discovery)
-    PeerDiscovered   { peer_id: String, addr: String, node_name: String },
+    PeerDiscovered {
+        peer_id: String,
+        addr: String,
+        node_name: String,
+    },
     /// TCP connection to a peer is open
-    PeerConnected    { peer_id: String, node_name: String },
+    PeerConnected { peer_id: String, node_name: String },
     /// A peer connection was closed
     PeerDisconnected { peer_id: String },
     /// An outgoing dial attempt failed
-    DialFailed       { peer_id: Option<String>, error: String },
+    DialFailed {
+        peer_id: Option<String>,
+        error: String,
+    },
     /// The contents of the local sync folder (sent after SetFolder and on reconnect)
-    FolderListing    { files: Vec<GuiFileInfo> },
+    FolderListing { files: Vec<GuiFileInfo> },
     /// A new file transfer has started
-    TransferStarted  { peer_id: String, file_name: String, total_chunks: usize, file_size: u64 },
+    TransferStarted {
+        peer_id: String,
+        file_name: String,
+        total_chunks: usize,
+        file_size: u64,
+    },
     /// One chunk was received (verified = BLAKE3 hash matched)
-    ChunkReceived    { peer_id: String, file_name: String, chunk_index: usize, total_chunks: usize, verified: bool },
+    ChunkReceived {
+        peer_id: String,
+        file_name: String,
+        chunk_index: usize,
+        total_chunks: usize,
+        verified: bool,
+    },
     /// All chunks received, file written to disk successfully
     TransferComplete { peer_id: String, file_name: String },
     /// The remote peer's folder is empty or not set
-    RemoteEmpty      { peer_id: String },
+    RemoteEmpty { peer_id: String },
+    // sends when the folder is set ,  to later on , set up the watcher
     /// A protocol-level error message from a peer
-    PeerError        { peer_id: String, message: String },
+    PeerError { peer_id: String, message: String },
     /// A log line — mirrors the tracing output into the GUI console
-    Log              { level: String, message: String },
+    Log { level: String, message: String },
 }
 
 // ─── One file in a FolderListing ─────────────────────────────────────────────
 
 #[derive(Serialize, Debug, Clone)]
 pub struct GuiFileInfo {
-    pub name:   String,
-    pub size:   u64,
+    pub name: String,
+    pub size: u64,
     pub chunks: usize,
 }

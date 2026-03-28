@@ -84,6 +84,7 @@ pub async fn on_command(
     swarm: &mut Swarm<MyBehaviour>,
     state: Arc<Mutex<AppState>>,
     event_tx: &mpsc::UnboundedSender<GuiEvent>,
+    watch_tx: &mpsc::UnboundedSender<PathBuf>,
     node_name: &str,
 ) {
     match cmd {
@@ -98,6 +99,7 @@ pub async fn on_command(
                 Ok(a) => a,
                 Err(e) => return log(event_tx, "ERROR", format!("Bad path: {e}")),
             };
+            let _ = watch_tx.send(abs.clone());
 
             match storage::list_folder(&abs).await {
                 Ok(files) => {
@@ -518,6 +520,65 @@ async fn on_request(
                 .behaviour_mut()
                 .rr
                 .send_response(channel, SyncMessage::Ack);
+        }
+        SyncMessage::FileChanged { ref file_name } => {
+            let _ = swarm
+                .behaviour_mut()
+                .rr
+                .send_response(channel, SyncMessage::Ack);
+
+            let sync_path = state.lock().await.sync_path.clone();
+            if let Some(ref path) = sync_path {
+                let mut full_path = path.clone();
+                for component in file_name.split('/') {
+                    full_path.push(component);
+                }
+                // delete local copy so manifest check doesn't skip it
+                let _ = std::fs::remove_file(&full_path);
+
+                log(
+                    event_tx,
+                    "INFO",
+                    format!(
+                        "{} changed on {} — re-requesting",
+                        file_name,
+                        short_id(pid_str)
+                    ),
+                );
+
+                swarm
+                    .behaviour_mut()
+                    .rr
+                    .send_request(&peer, SyncMessage::ManifestRequest);
+            }
+        }
+
+        SyncMessage::FileDeleted { ref file_name } => {
+            let _ = swarm
+                .behaviour_mut()
+                .rr
+                .send_response(channel, SyncMessage::Ack);
+
+            let sync_path = state.lock().await.sync_path.clone();
+            if let Some(ref path) = sync_path {
+                let mut full_path = path.clone();
+                for component in file_name.split('/') {
+                    full_path.push(component);
+                }
+                if let Err(e) = std::fs::remove_file(&full_path) {
+                    log(
+                        event_tx,
+                        "WARN",
+                        format!("Could not delete {file_name}: {e}"),
+                    );
+                } else {
+                    log(
+                        event_tx,
+                        "OK",
+                        format!("{file_name} deleted (peer removed it)"),
+                    );
+                }
+            }
         }
 
         _ => {

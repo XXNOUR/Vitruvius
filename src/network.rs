@@ -1,13 +1,13 @@
 // src/network.rs
 use anyhow::Result;
-use libp2p::{PeerId, StreamProtocol, Swarm, mdns, request_response};
+use libp2p::{mdns, request_response, PeerId, StreamProtocol, Swarm};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileEntry {
-    pub file_name:    String,
-    pub file_size:    u64,
+    pub file_name: String,
+    pub file_size: u64,
     pub total_chunks: usize,
     pub chunk_hashes: Vec<[u8; 32]>,
 }
@@ -17,35 +17,58 @@ pub enum SyncMessage {
     // ── Announcements ────────────────────────────────────────────────────────
     /// Sent to all connected peers when a sync folder is set.
     /// Means: "I now have files — please request my manifest."
-    FolderAnnouncement { node_name: String },
+    FolderAnnouncement {
+        node_name: String,
+    },
 
     // ── Requests ─────────────────────────────────────────────────────────────
     ManifestRequest,
-    ChunkRequest { file_name: String, chunk_index: usize },
+    ChunkRequest {
+        file_name: String,
+        chunk_index: usize,
+    },
 
     // ── Responses ────────────────────────────────────────────────────────────
-    Manifest { node_name: String, files: Vec<FileEntry> },
-    ChunkResponse { file_name: String, chunk_index: usize, data: Vec<u8>, hash: [u8; 32] },
+    Manifest {
+        node_name: String,
+        files: Vec<FileEntry>,
+    },
+    ChunkResponse {
+        file_name: String,
+        chunk_index: usize,
+        data: Vec<u8>,
+        hash: [u8; 32],
+    },
     /// Semantic: peer has no sync folder or their folder is empty.
     /// Only meaningful as a response to ManifestRequest.
     Empty,
     /// Pure protocol ACK — closes an RR channel with no semantic meaning.
     /// Used to acknowledge: FolderAnnouncement, TransferComplete.
     Ack,
-    Error { message: String },
+    Error {
+        message: String,
+    },
+    FileChanged {
+        file_name: String,
+    },
+    FileDeleted {
+        file_name: String,
+    },
 
     // ── Notifications ─────────────────────────────────────────────────────────
-    TransferComplete { file_name: String },
+    TransferComplete {
+        file_name: String,
+    },
 }
 
 #[derive(libp2p::swarm::NetworkBehaviour)]
 pub struct MyBehaviour {
     pub mdns: mdns::tokio::Behaviour,
-    pub rr:   request_response::cbor::Behaviour<SyncMessage, SyncMessage>,
+    pub rr: request_response::cbor::Behaviour<SyncMessage, SyncMessage>,
 }
 
 pub async fn setup_network() -> Result<Swarm<MyBehaviour>> {
-    let local_key     = libp2p::identity::Keypair::generate_ed25519();
+    let local_key = libp2p::identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
     println!("--- Vitruvius Node ---");
     println!("YOUR ID: {}", local_peer_id);
@@ -62,10 +85,8 @@ pub async fn setup_network() -> Result<Swarm<MyBehaviour>> {
             libp2p::yamux::Config::default,
         )?
         .with_behaviour(|key| {
-            let mdns = mdns::tokio::Behaviour::new(
-                mdns::Config::default(),
-                key.public().to_peer_id(),
-            )?;
+            let mdns =
+                mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?;
             let rr = request_response::cbor::Behaviour::<SyncMessage, SyncMessage>::new(
                 [(
                     StreamProtocol::new("/vitruvius/sync/1.0"),
