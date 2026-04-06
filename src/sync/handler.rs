@@ -534,6 +534,14 @@ async fn on_request(
                     full_path.push(component);
                 }
                 // delete local copy so manifest check doesn't skip it
+                state.lock().await.deleting_files.insert(full_path.clone());
+let _ = std::fs::remove_file(&full_path);
+let state2 = Arc::clone(state);  // need to capture for the spawn
+let value = full_path.clone();
+tokio::spawn(async move {
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    state2.lock().await.deleting_files.remove(&value);
+});
                 let _ = std::fs::remove_file(&full_path);
 
                 log(
@@ -595,7 +603,9 @@ async fn on_request(
 // =============================================================================
 // DOWNLOADER — handle a response to one of our requests
 // =============================================================================
-
+// =============================================================================
+// SCHEDULER — promote files from queue → active up to MAX_CONCURRENT_FILES
+// =============================================================================
 async fn on_response(
     response: SyncMessage,
     peer: PeerId,
@@ -606,10 +616,8 @@ async fn on_response(
     transfers: &mut HashMap<PeerId, PeerDownload>,
 ) {
     match response {
-        // Pure protocol ACK — ignore completely
         SyncMessage::Ack => {}
 
-        // ── Manifest received ─────────────────────────────────────────────────
         SyncMessage::Manifest {
             node_name: peer_name,
             ref files,
@@ -621,11 +629,7 @@ async fn on_response(
                 .insert(pid_str.to_string(), peer_name.clone());
 
             if files.is_empty() {
-                log(
-                    event_tx,
-                    "INFO",
-                    format!("{peer_name} manifest returned no files"),
-                );
+                log(event_tx, "INFO", format!("{peer_name} manifest returned no files"));
                 return;
             }
 
@@ -643,14 +647,11 @@ async fn on_response(
 
             let dl = transfers.entry(peer).or_insert_with(PeerDownload::new);
 
-            // Sort files into: need-to-download vs already-done
             let mut newly_queued = 0usize;
             for fe in files {
-                // Skip if already on disk (relative path, may contain subdirs)
                 if rel_path_exists(&sync_path, &fe.file_name) {
                     continue;
                 }
-                // Skip if already active or queued
                 if dl.active.contains_key(&fe.file_name) {
                     continue;
                 }
@@ -676,19 +677,15 @@ async fn on_response(
                 event_tx,
                 "INFO",
                 format!(
-                    "{peer_name}: {newly_queued} file(s) queued \
-                         ({} active, {} waiting)",
+                    "{peer_name}: {newly_queued} file(s) queued ({} active, {} waiting)",
                     dl.active.len(),
                     dl.queue.len()
                 ),
             );
 
-            // Start files up to the concurrency limit
             start_queued_files(peer, &sync_path, dl, swarm, event_tx, pid_str);
         }
 
-        // ── Empty: peer has no folder or no files ─────────────────────────────
-        // This is only a response to ManifestRequest — do not confuse with Ack.
         SyncMessage::Empty => {
             let _ = event_tx.send(GuiEvent::RemoteEmpty {
                 peer_id: pid_str.to_string(),
@@ -700,7 +697,6 @@ async fn on_response(
             );
         }
 
-        // ── One chunk arrived ─────────────────────────────────────────────────
         SyncMessage::ChunkResponse {
             ref file_name,
             chunk_index,
@@ -719,18 +715,19 @@ async fn on_response(
 
             let ts = match dl.active.get_mut(file_name) {
                 Some(t) => t,
-                None => return, // stray chunk after completion — ignore
+                None => return,
             };
 
-            // Verify against the hash from the Manifest (not the sender's claimed hash)
             let expected: Option<[u8; 32]> = ts
                 .metadata
                 .as_ref()
                 .and_then(|m| m.chunk_hashes.get(chunk_index))
                 .copied();
+
             let verified = expected
                 .map(|h| storage::verify_chunk(data, &h))
                 .unwrap_or(false);
+
             let total = ts.metadata.as_ref().map(|m| m.total_chunks).unwrap_or(0);
 
             let _ = event_tx.send(GuiEvent::ChunkReceived {
@@ -757,11 +754,9 @@ async fn on_response(
                 return;
             }
 
-            // Store chunk, update activity timer
             ts.received_chunks.insert(chunk_index, data.clone());
             ts.last_activity = std::time::Instant::now();
 
-            // Advance the sliding window
             if ts.next_request < total {
                 swarm.behaviour_mut().rr.send_request(
                     &peer,
@@ -779,34 +774,39 @@ async fn on_response(
                 format!("{file_name}  {}/{total}", chunk_index + 1),
             );
 
-            // Not done yet
             if ts.received_chunks.len() < total {
                 return;
             }
 
-            // ── All chunks received — reassemble ──────────────────────────────
             match storage::reassemble(ts).await {
-                Ok(()) => {
+                Ok(written_path) => {
+                    state.lock().await.writing_files.insert(written_path.clone());
+
                     let fname = file_name.clone();
+
                     let _ = event_tx.send(GuiEvent::TransferComplete {
                         peer_id: pid_str.to_string(),
                         file_name: fname.clone(),
                     });
-                    log(event_tx, "OK", format!("✅  {fname} saved to disk"));
-                    // Notify the sender
+
+                    log(event_tx, "OK", format!("  {fname} saved to disk"));
+
                     swarm.behaviour_mut().rr.send_request(
                         &peer,
                         SyncMessage::TransferComplete {
                             file_name: fname.clone(),
                         },
                     );
-                    // Remove from active — must happen AFTER send_request above
-                    dl.active.remove(&fname);
 
-                    // ── Start next file from the queue ────────────────────────
+                    dl.active.remove(&fname);
                     start_queued_files(peer, &sync_path, dl, swarm, event_tx, pid_str);
 
-                    // Report queue status
+                    let state2 = Arc::clone(state);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                        state2.lock().await.writing_files.remove(&written_path);
+                    });
+
                     if !dl.queue.is_empty() || !dl.active.is_empty() {
                         log(
                             event_tx,
@@ -821,17 +821,17 @@ async fn on_response(
                         log(
                             event_tx,
                             "OK",
-                            format!("All downloads from {} complete!", short_id(pid_str)),
+                            format!(
+                                "All downloads from {} complete!",
+                                short_id(pid_str)
+                            ),
                         );
                     }
                 }
+
                 Err(e) => {
                     error!("Reassembly error for {file_name}: {e}");
-                    log(
-                        event_tx,
-                        "ERROR",
-                        format!("Failed to write {file_name}: {e}"),
-                    );
+                    log(event_tx, "ERROR", format!("Failed to write {file_name}: {e}"));
                 }
             }
         }
@@ -853,10 +853,6 @@ async fn on_response(
         }
     }
 }
-
-// =============================================================================
-// SCHEDULER — promote files from queue → active up to MAX_CONCURRENT_FILES
-// =============================================================================
 
 fn start_queued_files(
     peer: PeerId,

@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use notify::{EventKind, RecursiveMode, Watcher};
-use tokio::sync::mpsc;
 use tracing::{info, warn};
+use std::sync::Arc;
 
 use crate::gui::{GuiEvent, GuiFileInfo};
 use crate::storage;
+use tokio::sync::{mpsc, Mutex};
 
 // What the watcher tells main happened — main owns the swarm
 // so it's the only one that can send SyncMessages to peers
@@ -20,6 +21,7 @@ pub async fn run_watcher(
     path: PathBuf,
     event_tx: mpsc::UnboundedSender<GuiEvent>,
     notify_tx: mpsc::UnboundedSender<WatchNotification>,
+        state: Arc<Mutex<crate::state::AppState>>,   // ← ADD
 ) {
     // bridge between notify's sync callback and our async loop
     let (fs_tx, mut fs_rx) = mpsc::unbounded_channel::<notify::Event>();
@@ -37,7 +39,7 @@ pub async fn run_watcher(
             }
         };
 
-    if let Err(e) = watcher.watch(&path, RecursiveMode::NonRecursive) {
+    if let Err(e) = watcher.watch(&path, RecursiveMode::Recursive) {
         warn!("Failed to watch {:?}: {}", path, e);
         return;
     }
@@ -54,44 +56,49 @@ pub async fn run_watcher(
             Some(ev) = fs_rx.recv() => {
                 match ev.kind {
                     EventKind::Create(_) | EventKind::Modify(_) => {
-                        for changed_path in &ev.paths {
-                            // only notify peers about actual files, not directories
-                            if changed_path.is_file() {
-                                if let Some(file_name) = changed_path
-                                    .strip_prefix(&path)
-                                    .ok()
-                                    .and_then(|r| r.to_str())
-                                    .map(|s| s.replace('\\', "/")) // normalize on Windows
-                                {
-                                    let _ = notify_tx.send(
-                                        WatchNotification::FileChanged { file_name }
-                                    );
-                                }
-                            }
-                        }
-                        dirty = true;
-                    }
+    for changed_path in &ev.paths {
+        if changed_path.is_file() {
+            // Suppress events for files we just wrote ourselves
+            if state.lock().await.writing_files.contains(changed_path) {
+                continue;
+            }
+
+            if let Some(file_name) = changed_path
+                .strip_prefix(&path)
+                .ok()
+                .and_then(|r| r.to_str())
+                .map(|s| s.replace('\\', "/"))
+            {
+                let _ = notify_tx.send(WatchNotification::FileChanged { file_name });
+            }
+        }
+    }
+    dirty = true;
+}
+                    
 
                     EventKind::Remove(_) => {
-                        for removed_path in &ev.paths {
-                            if let Some(file_name) = removed_path
-                                .strip_prefix(&path)
-                                .ok()
-                                .and_then(|r| r.to_str())
-                                .map(|s| s.replace('\\', "/"))
-                            {
-                                let _ = notify_tx.send(
-                                    WatchNotification::FileDeleted { file_name }
-                                );
-                            }
-                        }
-                        dirty = true;
-                    }
+    for removed_path in &ev.paths {
+        // Suppress deletes we triggered ourselves
+        if state.lock().await.deleting_files.contains(removed_path) {
+            continue;
+        }
+        if let Some(file_name) = removed_path
+            .strip_prefix(&path)
+            .ok()
+            .and_then(|r| r.to_str())
+            .map(|s| s.replace('\\', "/"))
+        {
+            let _ = notify_tx.send(WatchNotification::FileDeleted { file_name });
+        }
+    }
+    dirty = true;
+}
 
                     _ => {}
                 }
             }
-
+ 
             _ = debounce.tick() => {
                 if !dirty { continue; }
                 dirty = false;

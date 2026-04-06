@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 // ─── Browser → Backend ────────────────────────────────────────────────────────
 

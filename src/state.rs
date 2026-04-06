@@ -23,6 +23,9 @@ pub struct AppState {
     /// Prevents the ping-pong loop: A announces → B announces back → A announces → …
     /// Cleared when the sync folder changes (so re-announcing is intentional).
     pub announced_to:    HashSet<PeerId>,
+    pub writing_files: HashSet<PathBuf>,
+    pub deleting_files: HashSet<PathBuf>,
+
 }
 
 impl AppState {
@@ -34,7 +37,9 @@ impl AppState {
             node_name,
             peer_names:      HashMap::new(),
             announced_to:    HashSet::new(),
-        }
+            writing_files:   HashSet::new(),  // ← ADD THIS
+
+deleting_files : HashSet::new()        }
     }
 }
 

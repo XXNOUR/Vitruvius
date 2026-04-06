@@ -138,10 +138,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 ).await;
                             }
                             Some(path) = watch_rx.recv() => {
-            let event_tx2 = event_tx.clone();
-            let notify_tx2 = notify_tx.clone();
-            tokio::spawn(watcher::run_watcher(path, event_tx2, notify_tx2));
-        }
+    let event_tx2 = event_tx.clone();
+    let notify_tx2 = notify_tx.clone();
+    let state3 = Arc::clone(&state);   // ← ADD
+    tokio::spawn(watcher::run_watcher(path, event_tx2, notify_tx2, state3));  // ← ADD
+}
+        
 
         Some(notification) = notify_rx.recv() => {
             match notification {

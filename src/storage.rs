@@ -228,21 +228,17 @@ pub fn verify_chunk(data: &[u8], expected: &[u8; 32]) -> bool {
     blake3::hash(data).as_bytes() == expected
 }
 
-// ─── Reassemble file from all received chunks ─────────────────────────────────
-// Creates all necessary parent directories before writing.
-pub async fn reassemble(ts: &FileTransferState) -> Result<()> {
+pub async fn reassemble(ts: &FileTransferState) -> Result<PathBuf> {
     let meta = ts
         .metadata
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("No metadata during reassembly"))?;
 
-    // Build the full output path from relative path (forward-slash separated)
     let mut out_path = ts.sync_dir.clone();
     for component in meta.file_name.split('/') {
         out_path.push(component);
     }
 
-    // Create parent directories (e.g. photos/ or src/utils/)
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("Cannot create dirs {:?}", parent))?;
     }
@@ -264,7 +260,7 @@ pub async fn reassemble(ts: &FileTransferState) -> Result<()> {
     }
     out.sync_all()?;
     info!("Written: {:?}", out_path);
-    Ok(())
+    Ok(out_path)  // ← return the path instead of ()
 }
 
 // ─── Legacy wrapper ───────────────────────────────────────────────────────────
