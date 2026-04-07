@@ -263,6 +263,43 @@ pub async fn reassemble(ts: &FileTransferState) -> Result<PathBuf> {
     Ok(out_path)  // ← return the path instead of ()
 }
 
+pub async fn build_chunk_index(
+    sync_root: &PathBuf,
+) -> HashMap<[u8; 32], (String, usize)> {
+    let mut index = HashMap::new();
+
+    // Reuse the existing metadata walker — it already hashes every chunk
+    let files = match list_folder(sync_root).await {
+        Ok(f) => f,
+        Err(_) => return index, // empty folder or unreadable — return empty index
+    };
+
+    for file in files {
+        for (chunk_index, hash) in file.chunk_hashes.iter().enumerate() {
+            // first file that has this hash wins — any copy is equally valid
+            index.entry(*hash).or_insert_with(|| {
+                (file.file_name.clone(), chunk_index)
+            });
+        }
+    }
+
+    index
+}
+
+pub async fn read_local_chunk(
+    sync_root: &PathBuf,
+    rel_path: &str,
+    chunk_index: usize,
+) -> Option<Vec<u8>> {
+    // reuse the existing get_chunk logic — it already does seek + read
+    match get_chunk(sync_root, rel_path, chunk_index).await {
+        Ok(SyncMessage::ChunkResponse { data, .. }) => Some(data),
+        _ => None,
+    }
+    }
+    
+
+
 // ─── Legacy wrapper ───────────────────────────────────────────────────────────
 #[allow(dead_code)]
 pub async fn process_chunk(

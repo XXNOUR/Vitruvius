@@ -853,7 +853,6 @@ async fn on_response(
         }
     }
 }
-
 fn start_queued_files(
     peer: PeerId,
     sync_path: &PathBuf,
@@ -865,20 +864,107 @@ fn start_queued_files(
     while dl.active.len() < MAX_CONCURRENT_FILES {
         let pf = match dl.queue.pop_front() {
             Some(f) => f,
-            None => break, // queue empty
+            None => break,
         };
 
-        // Double-check it didn't appear on disk while queued
-        // Use component-based join to handle forward-slash relative paths correctly
         if rel_path_exists(sync_path, &pf.file_name) {
-            log(
-                event_tx,
-                "INFO",
-                format!("{} appeared on disk — skipping", pf.file_name),
-            );
+            log(event_tx, "INFO", format!("{} already on disk — skipping", pf.file_name));
             continue;
         }
 
+        // ── Stage 2: check local chunk index ─────────────────────────────
+        // Build index synchronously-ish by blocking — this is cheap (just
+        // hashing already-computed metadata). We use a blocking call here
+        // because start_queued_files is a sync fn called from async context.
+        let index = {
+            let sp = sync_path.clone();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(storage::build_chunk_index(&sp))
+            })
+        };
+
+        let mut ts = FileTransferState::new(sync_path.clone());
+        ts.metadata = Some(FileMetadata {
+            file_name:    pf.file_name.clone(),
+            total_chunks: pf.total_chunks,
+            file_size:    pf.file_size,
+            chunk_hashes: pf.chunk_hashes.clone(),
+        });
+
+        // ── Fill chunks we already have locally ───────────────────────────
+        let mut local_hits = 0usize;
+        for (chunk_index, hash) in pf.chunk_hashes.iter().enumerate() {
+            if let Some((src_file, src_chunk)) = index.get(hash) {
+                // read the data from the local file
+                let sp = sync_path.clone();
+                let src_file = src_file.clone();
+                let src_chunk = *src_chunk;
+                let data = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(storage::read_local_chunk(&sp, &src_file, src_chunk))
+                });
+                if let Some(bytes) = data {
+                    ts.received_chunks.insert(chunk_index, bytes);
+                    local_hits += 1;
+                }
+            }
+        }
+
+        let total = pf.total_chunks;
+        let needed: Vec<usize> = (0..total)
+            .filter(|i| !ts.received_chunks.contains_key(i))
+            .collect();
+
+        if local_hits > 0 {
+            log(
+                event_tx,
+                "INFO",
+                format!(
+                    "{} — {}/{} chunks from local cache, {} to download",
+                    pf.file_name, local_hits, total, needed.len()
+                ),
+            );
+        }
+
+        // ── Case A: file fully satisfied from local cache ─────────────────
+        if needed.is_empty() {
+            log(event_tx, "OK", format!("{} — fully deduped, 0 bytes from network", pf.file_name));
+
+            let _ = event_tx.send(GuiEvent::TransferStarted {
+                peer_id:      pid_str.to_string(),
+                file_name:    pf.file_name.clone(),
+                total_chunks: pf.total_chunks,
+                file_size:    pf.file_size,
+            });
+
+            // reassemble immediately — no network needed
+            let sp = sync_path.clone();
+            let fname = pf.file_name.clone();
+            let etx = event_tx.clone();
+            let pid = pid_str.to_string();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    match storage::reassemble(&ts).await {
+                        Ok(_) => {
+                            let _ = etx.send(GuiEvent::TransferComplete {
+                                peer_id:   pid.clone(),
+                                file_name: fname.clone(),
+                            });
+                            log(&etx, "OK", format!("{fname} written from local data"));
+                        }
+                        Err(e) => {
+                            log(&etx, "ERROR", format!("Reassembly failed for {fname}: {e}"));
+                        }
+                    }
+                })
+            });
+
+            // don't add to active — it's already done
+            continue;
+        }
+
+        // ── Case B: partial or full download needed ───────────────────────
         log(
             event_tx,
             "INFO",
@@ -891,35 +977,30 @@ fn start_queued_files(
         );
 
         let _ = event_tx.send(GuiEvent::TransferStarted {
-            peer_id: pid_str.to_string(),
-            file_name: pf.file_name.clone(),
+            peer_id:      pid_str.to_string(),
+            file_name:    pf.file_name.clone(),
             total_chunks: pf.total_chunks,
-            file_size: pf.file_size,
+            file_size:    pf.file_size,
         });
 
-        let mut ts = FileTransferState::new(sync_path.clone());
-        ts.metadata = Some(FileMetadata {
-            file_name: pf.file_name.clone(),
-            total_chunks: pf.total_chunks,
-            file_size: pf.file_size,
-            chunk_hashes: pf.chunk_hashes.clone(),
-        });
-
-        // Fire the first WINDOW chunk requests for this file
-        let count = pf.total_chunks.min(WINDOW);
-        for c in 0..count {
+        // request only the chunks we don't have
+        let count = needed.len().min(WINDOW);
+        for &ci in needed.iter().take(count) {
             swarm.behaviour_mut().rr.send_request(
                 &peer,
                 SyncMessage::ChunkRequest {
-                    file_name: pf.file_name.clone(),
-                    chunk_index: c,
+                    file_name:   pf.file_name.clone(),
+                    chunk_index: ci,
                 },
             );
         }
-        ts.next_request = count;
+        // next_request should skip past any locally-filled chunks
+        ts.next_request = needed.get(count).copied().unwrap_or(total);
+
         dl.active.insert(pf.file_name.clone(), ts);
     }
 }
+
 
 // =============================================================================
 // Helpers

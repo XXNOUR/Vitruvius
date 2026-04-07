@@ -5,6 +5,7 @@ mod state;
 mod storage;
 mod sync;
 mod watcher;
+mod crypto;
 
 use std::collections::HashMap;
 use std::error::Error;
