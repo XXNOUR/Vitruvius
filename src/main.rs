@@ -1,11 +1,11 @@
 // src/main.rs
+mod crypto;
 mod gui;
 mod network;
 mod state;
 mod storage;
 mod sync;
 mod watcher;
-mod crypto;
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -126,43 +126,63 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         tokio::select! {
 
-                Some(cmd) = cmd_rx.recv() => {
+                        Some(cmd) = cmd_rx.recv() => {
 
 
-                                sync::on_command(
-                                    cmd, &mut swarm, Arc::clone(&state), &event_tx,&watch_tx, &node_name,
-                                ).await;
-                            }
-                            event = swarm.select_next_some() => {
-                                sync::on_swarm_event(
-                                    event, &mut swarm, Arc::clone(&state), &event_tx, &mut transfers,
-                                ).await;
-                            }
-                            Some(path) = watch_rx.recv() => {
-    let event_tx2 = event_tx.clone();
-    let notify_tx2 = notify_tx.clone();
-    let state3 = Arc::clone(&state);   // ← ADD
-    tokio::spawn(watcher::run_watcher(path, event_tx2, notify_tx2, state3));  // ← ADD
-}
-        
+                                        sync::on_command(
+                                            cmd, &mut swarm, Arc::clone(&state), &event_tx,&watch_tx, &node_name,
+                                        ).await;
+                                    }
+                                    event = swarm.select_next_some() => {
+                                        sync::on_swarm_event(
+                                            event, &mut swarm, Arc::clone(&state), &event_tx, &mut transfers,
+                                        ).await;
+                                    }
+                                    Some(path) = watch_rx.recv() => {
+            let event_tx2 = event_tx.clone();
+            let notify_tx2 = notify_tx.clone();
+            let state3 = Arc::clone(&state);   // ← ADD
+            tokio::spawn(watcher::run_watcher(path, event_tx2, notify_tx2, state3));  // ← ADD
+        }
 
-        Some(notification) = notify_rx.recv() => {
+
+               Some(notification) = notify_rx.recv() => {
             match notification {
                 watcher::WatchNotification::FileChanged { file_name } => {
-                    let peers: Vec<_> = state.lock().await
-                        .connected_peers.iter().cloned().collect();
-                    for peer in peers {
-                        swarm.behaviour_mut().rr.send_request(
-                            &peer,
-                            network::SyncMessage::FileChanged {
-                                file_name: file_name.clone(),
-                            },
-                        );
+                    // ── cooldown: don't re-broadcast the same file within 5 seconds ──
+                    let should_send = {
+                        let mut st = state.lock().await;
+                        let now = std::time::Instant::now();
+                        let recent = st.recently_notified.get(&file_name)
+                            .map(|t| t.elapsed().as_secs() < 5)
+                            .unwrap_or(false);
+                        if !recent {
+                            st.recently_notified.insert(file_name.clone(), now);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+
+                    if should_send {
+                        let peers: Vec<_> = state.lock().await
+                            .connected_peers.iter().cloned().collect();
+                        for peer in peers {
+                            swarm.behaviour_mut().rr.send_request(
+                                &peer,
+                                network::SyncMessage::FileChanged {
+                                    file_name: file_name.clone(),
+                                },
+                            );
+                        }
+                        info!("Notified peers: {} changed", file_name);
                     }
-                    info!("Notified peers: {} changed", file_name);
                 }
 
                 watcher::WatchNotification::FileDeleted { file_name } => {
+                    // clear cooldown on delete so a re-add is always announced
+                    state.lock().await.recently_notified.remove(&file_name);
+
                     let peers: Vec<_> = state.lock().await
                         .connected_peers.iter().cloned().collect();
                     for peer in peers {
@@ -176,16 +196,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     info!("Notified peers: {} deleted", file_name);
                 }
             }
-        }
+                }
+            } // select
+    } // loop
 
-                            _ = stall_tick.tick() => {
-                                sync::check_stalls(&mut swarm, &event_tx, &mut transfers).await;
-                            }
-                            _ = tokio::signal::ctrl_c() => {
-                                info!("Shutting down…");
-                                break;
-                            }
-                        }
-    }
     Ok(())
 }

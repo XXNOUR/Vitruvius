@@ -535,14 +535,13 @@ async fn on_request(
                 }
                 // delete local copy so manifest check doesn't skip it
                 state.lock().await.deleting_files.insert(full_path.clone());
-let _ = std::fs::remove_file(&full_path);
-let state2 = Arc::clone(state);  // need to capture for the spawn
-let value = full_path.clone();
-tokio::spawn(async move {
-    tokio::time::sleep(Duration::from_millis(2000)).await;
-    state2.lock().await.deleting_files.remove(&value);
-});
                 let _ = std::fs::remove_file(&full_path);
+                let state2 = Arc::clone(state); // need to capture for the spawn
+                let value = full_path.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(2000)).await;
+                    state2.lock().await.deleting_files.remove(&value);
+                });
 
                 log(
                     event_tx,
@@ -629,7 +628,11 @@ async fn on_response(
                 .insert(pid_str.to_string(), peer_name.clone());
 
             if files.is_empty() {
-                log(event_tx, "INFO", format!("{peer_name} manifest returned no files"));
+                log(
+                    event_tx,
+                    "INFO",
+                    format!("{peer_name} manifest returned no files"),
+                );
                 return;
             }
 
@@ -780,7 +783,11 @@ async fn on_response(
 
             match storage::reassemble(ts).await {
                 Ok(written_path) => {
-                    state.lock().await.writing_files.insert(written_path.clone());
+                    state
+                        .lock()
+                        .await
+                        .writing_files
+                        .insert(written_path.clone());
 
                     let fname = file_name.clone();
 
@@ -821,17 +828,18 @@ async fn on_response(
                         log(
                             event_tx,
                             "OK",
-                            format!(
-                                "All downloads from {} complete!",
-                                short_id(pid_str)
-                            ),
+                            format!("All downloads from {} complete!", short_id(pid_str)),
                         );
                     }
                 }
 
                 Err(e) => {
                     error!("Reassembly error for {file_name}: {e}");
-                    log(event_tx, "ERROR", format!("Failed to write {file_name}: {e}"));
+                    log(
+                        event_tx,
+                        "ERROR",
+                        format!("Failed to write {file_name}: {e}"),
+                    );
                 }
             }
         }
@@ -868,7 +876,11 @@ fn start_queued_files(
         };
 
         if rel_path_exists(sync_path, &pf.file_name) {
-            log(event_tx, "INFO", format!("{} already on disk — skipping", pf.file_name));
+            log(
+                event_tx,
+                "INFO",
+                format!("{} already on disk — skipping", pf.file_name),
+            );
             continue;
         }
 
@@ -879,16 +891,15 @@ fn start_queued_files(
         let index = {
             let sp = sync_path.clone();
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(storage::build_chunk_index(&sp))
+                tokio::runtime::Handle::current().block_on(storage::build_chunk_index(&sp))
             })
         };
 
         let mut ts = FileTransferState::new(sync_path.clone());
         ts.metadata = Some(FileMetadata {
-            file_name:    pf.file_name.clone(),
+            file_name: pf.file_name.clone(),
             total_chunks: pf.total_chunks,
-            file_size:    pf.file_size,
+            file_size: pf.file_size,
             chunk_hashes: pf.chunk_hashes.clone(),
         });
 
@@ -922,20 +933,27 @@ fn start_queued_files(
                 "INFO",
                 format!(
                     "{} — {}/{} chunks from local cache, {} to download",
-                    pf.file_name, local_hits, total, needed.len()
+                    pf.file_name,
+                    local_hits,
+                    total,
+                    needed.len()
                 ),
             );
         }
 
         // ── Case A: file fully satisfied from local cache ─────────────────
         if needed.is_empty() {
-            log(event_tx, "OK", format!("{} — fully deduped, 0 bytes from network", pf.file_name));
+            log(
+                event_tx,
+                "OK",
+                format!("{} — fully deduped, 0 bytes from network", pf.file_name),
+            );
 
             let _ = event_tx.send(GuiEvent::TransferStarted {
-                peer_id:      pid_str.to_string(),
-                file_name:    pf.file_name.clone(),
+                peer_id: pid_str.to_string(),
+                file_name: pf.file_name.clone(),
                 total_chunks: pf.total_chunks,
-                file_size:    pf.file_size,
+                file_size: pf.file_size,
             });
 
             // reassemble immediately — no network needed
@@ -948,7 +966,7 @@ fn start_queued_files(
                     match storage::reassemble(&ts).await {
                         Ok(_) => {
                             let _ = etx.send(GuiEvent::TransferComplete {
-                                peer_id:   pid.clone(),
+                                peer_id: pid.clone(),
                                 file_name: fname.clone(),
                             });
                             log(&etx, "OK", format!("{fname} written from local data"));
@@ -977,10 +995,10 @@ fn start_queued_files(
         );
 
         let _ = event_tx.send(GuiEvent::TransferStarted {
-            peer_id:      pid_str.to_string(),
-            file_name:    pf.file_name.clone(),
+            peer_id: pid_str.to_string(),
+            file_name: pf.file_name.clone(),
             total_chunks: pf.total_chunks,
-            file_size:    pf.file_size,
+            file_size: pf.file_size,
         });
 
         // request only the chunks we don't have
@@ -989,7 +1007,7 @@ fn start_queued_files(
             swarm.behaviour_mut().rr.send_request(
                 &peer,
                 SyncMessage::ChunkRequest {
-                    file_name:   pf.file_name.clone(),
+                    file_name: pf.file_name.clone(),
                     chunk_index: ci,
                 },
             );
@@ -1000,7 +1018,6 @@ fn start_queued_files(
         dl.active.insert(pf.file_name.clone(), ts);
     }
 }
-
 
 // =============================================================================
 // Helpers

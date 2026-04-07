@@ -10,36 +10,38 @@ use std::path::PathBuf;
 
 pub struct AppState {
     /// peer_id string → last known multiaddr (populated by mDNS)
-    pub known_addrs:     HashMap<String, String>,
+    pub known_addrs: HashMap<String, String>,
     /// set of peers with an open TCP connection right now
     pub connected_peers: HashSet<PeerId>,
     /// the local folder this node is syncing (None until the user sets it)
-    pub sync_path:       Option<PathBuf>,
+    pub sync_path: Option<PathBuf>,
     /// this device's human-readable hostname
-    pub node_name:       String,
+    pub node_name: String,
     /// peer_id string → hostname, learned from FolderAnnouncement / Manifest
-    pub peer_names:      HashMap<String, String>,
+    pub peer_names: HashMap<String, String>,
     /// peers we have already sent a FolderAnnouncement to in this session.
     /// Prevents the ping-pong loop: A announces → B announces back → A announces → …
     /// Cleared when the sync folder changes (so re-announcing is intentional).
-    pub announced_to:    HashSet<PeerId>,
+    pub announced_to: HashSet<PeerId>,
     pub writing_files: HashSet<PathBuf>,
     pub deleting_files: HashSet<PathBuf>,
-
+    pub recently_notified: HashMap<String, std::time::Instant>,
 }
 
 impl AppState {
     pub fn new(node_name: String) -> Self {
         Self {
-            known_addrs:     HashMap::new(),
+            known_addrs: HashMap::new(),
             connected_peers: HashSet::new(),
-            sync_path:       None,
+            sync_path: None,
             node_name,
-            peer_names:      HashMap::new(),
-            announced_to:    HashSet::new(),
-            writing_files:   HashSet::new(),  // ← ADD THIS
+            peer_names: HashMap::new(),
+            announced_to: HashSet::new(),
+            writing_files: HashSet::new(), // ← ADD THIS
 
-deleting_files : HashSet::new()        }
+            deleting_files: HashSet::new(),
+            recently_notified: HashMap::new(),
+        }
     }
 }
 
@@ -48,11 +50,15 @@ deleting_files : HashSet::new()        }
 pub fn get_node_name() -> String {
     if let Ok(h) = std::env::var("HOSTNAME") {
         let h = h.trim().to_string();
-        if !h.is_empty() { return h; }
+        if !h.is_empty() {
+            return h;
+        }
     }
     if let Ok(h) = std::fs::read_to_string("/etc/hostname") {
         let h = h.trim().to_string();
-        if !h.is_empty() { return h; }
+        if !h.is_empty() {
+            return h;
+        }
     }
     "Vitruvius-Node".to_string()
 }
