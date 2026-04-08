@@ -1,6 +1,5 @@
 name: Release
 
-# Triggers only when you push a tag like v0.1.0-alpha
 on:
   push:
     tags:
@@ -14,23 +13,21 @@ jobs:
   build-linux:
     name: Build Linux (x86_64 static)
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
-      # ── Checkout code ───────────────────────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Install Rust ────────────────────────────────────────────────────────
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
 
-      # ── Install musl linker ─────────────────────────────────────────────────
       - name: Install musl tools
         run: sudo apt-get install -y musl-tools
 
-      # ── Cache dependencies ──────────────────────────────────────────────────
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -40,16 +37,12 @@ jobs:
             target
           key: linux-musl-${{ hashFiles('**/Cargo.lock') }}
 
-      # ── Build ───────────────────────────────────────────────────────────────
       - name: Build release binary
         run: |
           cargo build --release --target x86_64-unknown-linux-musl
-          
-          # Rename to clean name for the release
-          cp target/x86_64-unknown-linux-musl/release/${{ env.BINARY_NAME }} \
-             vitruvius-x86_64-linux
+          cp target/x86_64-unknown-linux-musl/release/${{ env.BINARY_NAME }} vitruvius-x86_64-linux
 
-             - name: Create Release
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           name: "Vitruvius ${{ github.ref_name }}"
@@ -58,7 +51,7 @@ jobs:
 
             ### Installation
 
-            Linux (x86_64) — download and run:
+            Linux (x86_64):
 
               curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/vitruvius-x86_64-linux -o vitruvius
               chmod +x vitruvius
@@ -67,7 +60,7 @@ jobs:
 
             Then open http://localhost:9000
 
-            ### What is in this release
+            ### Whats in this release
             - P2P LAN file sync via libp2p
             - mDNS automatic peer discovery
             - BLAKE3 chunk verification
