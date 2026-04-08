@@ -49,8 +49,7 @@ jobs:
           cp target/x86_64-unknown-linux-musl/release/${{ env.BINARY_NAME }} \
              vitruvius-x86_64-linux
 
-      # ── Create GitHub Release and upload binary ─────────────────────────────
-      - name: Create Release
+             - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           name: "Vitruvius ${{ github.ref_name }}"
@@ -59,20 +58,16 @@ jobs:
 
             ### Installation
 
-            **Linux (x86_64):**
-```bash
-            curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/vitruvius-x86_64-linux -o vitruvius
-            chmod +x vitruvius
-            sudo mv vitruvius /usr/local/bin/
-```
+            Linux (x86_64) — download and run:
 
-            Run it:
-```bash
-            vitruvius --http-port 9000 --ws-port 9001
-```
+              curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/vitruvius-x86_64-linux -o vitruvius
+              chmod +x vitruvius
+              sudo mv vitruvius /usr/local/bin/
+              vitruvius --http-port 9000 --ws-port 9001
+
             Then open http://localhost:9000
 
-            ### What's in this release
+            ### What is in this release
             - P2P LAN file sync via libp2p
             - mDNS automatic peer discovery
             - BLAKE3 chunk verification
