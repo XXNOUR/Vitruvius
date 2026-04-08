@@ -1,0 +1,87 @@
+name: Release
+
+# Triggers only when you push a tag like v0.1.0-alpha
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: vitruvius
+
+jobs:
+  build-linux:
+    name: Build Linux (x86_64 static)
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Checkout code ───────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Install Rust ────────────────────────────────────────────────────────
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      # ── Install musl linker ─────────────────────────────────────────────────
+      - name: Install musl tools
+        run: sudo apt-get install -y musl-tools
+
+      # ── Cache dependencies ──────────────────────────────────────────────────
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-musl-${{ hashFiles('**/Cargo.lock') }}
+
+      # ── Build ───────────────────────────────────────────────────────────────
+      - name: Build release binary
+        run: |
+          cargo build --release --target x86_64-unknown-linux-musl
+          
+          # Rename to clean name for the release
+          cp target/x86_64-unknown-linux-musl/release/${{ env.BINARY_NAME }} \
+             vitruvius-x86_64-linux
+
+      # ── Create GitHub Release and upload binary ─────────────────────────────
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Vitruvius ${{ github.ref_name }}"
+          body: |
+            ## Vitruvius ${{ github.ref_name }}
+
+            ### Installation
+
+            **Linux (x86_64):**
+```bash
+            curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/vitruvius-x86_64-linux -o vitruvius
+            chmod +x vitruvius
+            sudo mv vitruvius /usr/local/bin/
+```
+
+            Run it:
+```bash
+            vitruvius --http-port 9000 --ws-port 9001
+```
+            Then open http://localhost:9000
+
+            ### What's in this release
+            - P2P LAN file sync via libp2p
+            - mDNS automatic peer discovery
+            - BLAKE3 chunk verification
+            - Real-time file watcher
+            - Content-aware deduplication
+            - Browser-based GUI
+            - ChaCha20-Poly1305 encryption (in progress)
+
+          files: vitruvius-x86_64-linux
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
