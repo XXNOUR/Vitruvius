@@ -22,14 +22,21 @@
 //   This keeps concurrent streams at MAX_CONCURRENT_FILES × WINDOW = 3 × 4 = 12.
 //   Well within libp2p's 64-stream limit even for thousands of files.
 //
-// ── Sync trigger design ───────────────────────────────────────────────────────
-//   1. SetFolder (while connected) → FolderAnnouncement + ManifestRequest to all peers
-//   2. ConnectionEstablished (we have folder) → same for that peer
-//   3. Receiving FolderAnnouncement → ManifestRequest; reply with our announcement ONCE
+// ── Encryption design ─────────────────────────────────────────────────────────
 //
-// ── Empty vs Ack ─────────────────────────────────────────────────────────────
-//   SyncMessage::Empty — "I have no folder or no files" (response to ManifestRequest only)
-//   SyncMessage::Ack   — pure protocol close (response to FolderAnnouncement / TransferComplete)
+// All encryption/decryption is confined to two points:
+//
+//   SEND:    storage::get_chunk() encrypts the plaintext chunk just before it
+//            is placed into ChunkResponse.data. The plaintext hash is still
+//            placed into ChunkResponse.hash for the receiver to verify.
+//
+//   RECEIVE: on_response() (ChunkResponse arm) decrypts ChunkResponse.data
+//            BEFORE verifying the hash and BEFORE storing into received_chunks.
+//            This means received_chunks always contains plaintext, and
+//            reassemble() writes plaintext to disk unchanged.
+//
+// The encryption key is read from AppState on every chunk operation.
+// No key (None) → plaintext mode, fully backward-compatible.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -41,26 +48,22 @@ use libp2p::{mdns, request_response, swarm::SwarmEvent, Multiaddr, PeerId, Swarm
 use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info, warn};
 
+use crate::crypto;
 use crate::gui::{GuiCommand, GuiEvent, GuiFileInfo};
 use crate::network::{MyBehaviour, MyBehaviourEvent, SyncMessage};
 use crate::state::{short_id, AppState};
 use crate::storage::{self, FileMetadata, FileTransferState, PendingFile};
 
 /// Chunks in-flight per active file.
-/// 4 is a safe default: 3 files × 4 = 12 concurrent streams, well within limits.
 const WINDOW: usize = 4;
 
 /// Maximum files downloading at the same time.
-/// Controls total stream count = MAX_CONCURRENT_FILES × WINDOW.
 const MAX_CONCURRENT_FILES: usize = 3;
 
 /// Seconds without a chunk before a file is considered stalled.
 const STALL_SECS: u64 = 20;
 
 // ─── Per-peer download state ──────────────────────────────────────────────────
-// Stored in the transfers map as the value.
-// active: files currently downloading (chunk requests in-flight)
-// queue:  files waiting to start (no network traffic yet)
 pub struct PeerDownload {
     pub active: HashMap<String, FileTransferState>,
     pub queue: VecDeque<PendingFile>,
@@ -100,6 +103,14 @@ pub async fn on_command(
                 Err(e) => return log(event_tx, "ERROR", format!("Bad path: {e}")),
             };
             let _ = watch_tx.send(abs.clone());
+
+            // Log encryption status when folder is set so the user knows the mode.
+            let encrypted = state.lock().await.is_encrypted();
+            if encrypted {
+                log(event_tx, "OK", "🔐 Encryption enabled — chunks will be encrypted before sending".into());
+            } else {
+                log(event_tx, "WARN", "⚠  No key loaded — running in plaintext mode. Use --key-path to enable encryption.".into());
+            }
 
             match storage::list_folder(&abs).await {
                 Ok(files) => {
@@ -209,7 +220,7 @@ pub async fn on_command(
 }
 
 // =============================================================================
-// STALL CHECKER — fires every 10 seconds from main.rs
+// STALL CHECKER
 // =============================================================================
 
 pub async fn check_stalls(
@@ -250,7 +261,6 @@ pub async fn check_stalls(
                 ),
             );
 
-            // Re-request up to WINDOW missing chunks
             let to_req = missing.len().min(WINDOW);
             for &ci in missing.iter().take(to_req) {
                 swarm.behaviour_mut().rr.send_request(
@@ -261,7 +271,6 @@ pub async fn check_stalls(
                     },
                 );
             }
-            // Advance next_request past what we just re-requested
             if let Some(&last_ci) = missing.iter().take(to_req).last() {
                 ts.next_request = ts.next_request.max(last_ci + 1);
             }
@@ -348,7 +357,6 @@ pub async fn on_swarm_event(
                 st.connected_peers.remove(&peer_id);
                 st.announced_to.remove(&peer_id);
             }
-            // Drop all download state — will restart cleanly on reconnect
             transfers.remove(&peer_id);
             let reason = cause.map(|e| e.to_string()).unwrap_or_default();
             warn!("Closed: {} — {}", pid_str, reason);
@@ -417,17 +425,14 @@ async fn on_request(
                 "INFO",
                 format!("{peer_name} announced their folder — requesting their manifest …"),
             );
-            // ACK closes the RR channel without semantic meaning
             let _ = swarm
                 .behaviour_mut()
                 .rr
                 .send_response(channel, SyncMessage::Ack);
-            // Always request their manifest
             swarm
                 .behaviour_mut()
                 .rr
                 .send_request(&peer, SyncMessage::ManifestRequest);
-            // Reply with our announcement ONLY if we haven't already — prevents ping-pong loop
             let (have_folder, my_name) = folder_status(state).await;
             if have_folder {
                 let already = state.lock().await.announced_to.contains(&peer);
@@ -481,7 +486,12 @@ async fn on_request(
             ref file_name,
             chunk_index,
         } => {
-            let path = state.lock().await.sync_path.clone();
+            // Grab both the sync path and the encryption key in one lock.
+            let (path, enc_key) = {
+                let st = state.lock().await;
+                (st.sync_path.clone(), st.encryption_key)
+            };
+
             match path {
                 None => {
                     let _ = swarm.behaviour_mut().rr.send_response(
@@ -492,16 +502,22 @@ async fn on_request(
                     );
                 }
                 Some(ref p) => {
-                    let resp: SyncMessage = storage::get_chunk(p, file_name, chunk_index)
-                        .await
-                        .unwrap_or_else(|e: anyhow::Error| SyncMessage::Error {
-                            message: e.to_string(),
-                        });
+                    // Pass encryption key into get_chunk — it encrypts transparently.
+                    let resp: SyncMessage =
+                        storage::get_chunk(p, file_name, chunk_index, enc_key.as_ref())
+                            .await
+                            .unwrap_or_else(|e: anyhow::Error| SyncMessage::Error {
+                                message: e.to_string(),
+                            });
                     if matches!(resp, SyncMessage::ChunkResponse { .. }) {
+                        let enc_indicator = if enc_key.is_some() { "🔐" } else { "" };
                         log(
                             event_tx,
                             "INFO",
-                            format!("-> {file_name} [{chunk_index}] to {}", short_id(pid_str)),
+                            format!(
+                                "{enc_indicator}-> {file_name} [{chunk_index}] to {}",
+                                short_id(pid_str)
+                            ),
                         );
                     }
                     let _ = swarm.behaviour_mut().rr.send_response(channel, resp);
@@ -515,12 +531,12 @@ async fn on_request(
                 "OK",
                 format!("{} confirmed receipt of {file_name}", short_id(pid_str)),
             );
-            // ACK — not Empty — so the receiver doesn't think our folder is gone
             let _ = swarm
                 .behaviour_mut()
                 .rr
                 .send_response(channel, SyncMessage::Ack);
         }
+
         SyncMessage::FileChanged { ref file_name } => {
             let _ = swarm
                 .behaviour_mut()
@@ -533,10 +549,9 @@ async fn on_request(
                 for component in file_name.split('/') {
                     full_path.push(component);
                 }
-                // delete local copy so manifest check doesn't skip it
                 state.lock().await.deleting_files.insert(full_path.clone());
                 let _ = std::fs::remove_file(&full_path);
-                let state2 = Arc::clone(state); // need to capture for the spawn
+                let state2 = Arc::clone(state);
                 let value = full_path.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(2000)).await;
@@ -602,9 +617,7 @@ async fn on_request(
 // =============================================================================
 // DOWNLOADER — handle a response to one of our requests
 // =============================================================================
-// =============================================================================
-// SCHEDULER — promote files from queue → active up to MAX_CONCURRENT_FILES
-// =============================================================================
+
 async fn on_response(
     response: SyncMessage,
     peer: PeerId,
@@ -704,11 +717,44 @@ async fn on_response(
             ref file_name,
             chunk_index,
             ref data,
-            hash: _,
+            hash,
         } => {
             let sync_path = match state.lock().await.sync_path.clone() {
                 Some(p) => p,
                 None => return,
+            };
+
+            // ── DECRYPTION ────────────────────────────────────────────────────
+            // Decrypt BEFORE hash verification. The hash in the manifest is a
+            // plaintext hash, so we must have plaintext before we can verify it.
+            // If no key is set, pass the data through unchanged (plaintext mode).
+            let enc_key = state.lock().await.encryption_key;
+            let plaintext = match enc_key {
+                Some(ref key) => {
+                    match crypto::decrypt(key, data) {
+                        Ok(pt) => pt,
+                        Err(e) => {
+                            log(
+                                event_tx,
+                                "ERROR",
+                                format!(
+                                    "{file_name} chunk {chunk_index} decryption failed: {e}. \
+                                     Check that all peers use the same key file."
+                                ),
+                            );
+                            // Retry the chunk — the sender may have had a transient error.
+                            swarm.behaviour_mut().rr.send_request(
+                                &peer,
+                                SyncMessage::ChunkRequest {
+                                    file_name: file_name.clone(),
+                                    chunk_index,
+                                },
+                            );
+                            return;
+                        }
+                    }
+                }
+                None => data.clone(),
             };
 
             let dl = match transfers.get_mut(&peer) {
@@ -727,8 +773,9 @@ async fn on_response(
                 .and_then(|m| m.chunk_hashes.get(chunk_index))
                 .copied();
 
+            // Verify hash against PLAINTEXT — always.
             let verified = expected
-                .map(|h| storage::verify_chunk(data, &h))
+                .map(|h| storage::verify_chunk(&plaintext, &h))
                 .unwrap_or(false);
 
             let total = ts.metadata.as_ref().map(|m| m.total_chunks).unwrap_or(0);
@@ -757,7 +804,8 @@ async fn on_response(
                 return;
             }
 
-            ts.received_chunks.insert(chunk_index, data.clone());
+            // Store PLAINTEXT in received_chunks — reassemble() writes it directly to disk.
+            ts.received_chunks.insert(chunk_index, plaintext);
             ts.last_activity = std::time::Instant::now();
 
             if ts.next_request < total {
@@ -861,6 +909,11 @@ async fn on_response(
         }
     }
 }
+
+// =============================================================================
+// SCHEDULER
+// =============================================================================
+
 fn start_queued_files(
     peer: PeerId,
     sync_path: &PathBuf,
@@ -884,10 +937,6 @@ fn start_queued_files(
             continue;
         }
 
-        // ── Stage 2: check local chunk index ─────────────────────────────
-        // Build index synchronously-ish by blocking — this is cheap (just
-        // hashing already-computed metadata). We use a blocking call here
-        // because start_queued_files is a sync fn called from async context.
         let index = {
             let sp = sync_path.clone();
             tokio::task::block_in_place(|| {
@@ -903,11 +952,9 @@ fn start_queued_files(
             chunk_hashes: pf.chunk_hashes.clone(),
         });
 
-        // ── Fill chunks we already have locally ───────────────────────────
         let mut local_hits = 0usize;
         for (chunk_index, hash) in pf.chunk_hashes.iter().enumerate() {
             if let Some((src_file, src_chunk)) = index.get(hash) {
-                // read the data from the local file
                 let sp = sync_path.clone();
                 let src_file = src_file.clone();
                 let src_chunk = *src_chunk;
@@ -941,7 +988,6 @@ fn start_queued_files(
             );
         }
 
-        // ── Case A: file fully satisfied from local cache ─────────────────
         if needed.is_empty() {
             log(
                 event_tx,
@@ -956,8 +1002,6 @@ fn start_queued_files(
                 file_size: pf.file_size,
             });
 
-            // reassemble immediately — no network needed
-            let sp = sync_path.clone();
             let fname = pf.file_name.clone();
             let etx = event_tx.clone();
             let pid = pid_str.to_string();
@@ -977,12 +1021,9 @@ fn start_queued_files(
                     }
                 })
             });
-
-            // don't add to active — it's already done
             continue;
         }
 
-        // ── Case B: partial or full download needed ───────────────────────
         log(
             event_tx,
             "INFO",
@@ -1001,7 +1042,6 @@ fn start_queued_files(
             file_size: pf.file_size,
         });
 
-        // request only the chunks we don't have
         let count = needed.len().min(WINDOW);
         for &ci in needed.iter().take(count) {
             swarm.behaviour_mut().rr.send_request(
@@ -1012,7 +1052,6 @@ fn start_queued_files(
                 },
             );
         }
-        // next_request should skip past any locally-filled chunks
         ts.next_request = needed.get(count).copied().unwrap_or(total);
 
         dl.active.insert(pf.file_name.clone(), ts);
@@ -1023,8 +1062,6 @@ fn start_queued_files(
 // Helpers
 // =============================================================================
 
-/// Check whether a relative path (forward-slash separated) exists under sync_root.
-/// e.g. rel = "photos/img.jpg"  →  checks sync_root/photos/img.jpg
 fn rel_path_exists(sync_root: &std::path::PathBuf, rel: &str) -> bool {
     let mut p = sync_root.clone();
     for component in rel.split('/') {

@@ -26,6 +26,13 @@ pub struct AppState {
     pub writing_files: HashSet<PathBuf>,
     pub deleting_files: HashSet<PathBuf>,
     pub recently_notified: HashMap<String, std::time::Instant>,
+
+    /// ChaCha20-Poly1305 encryption key shared by all peers in this sync group.
+    /// None  → plaintext mode (useful for LAN testing without key setup).
+    /// Some  → all chunk data is encrypted before sending, decrypted on receipt.
+    /// The key is loaded from disk at startup via --key-path and never changes
+    /// at runtime. All peers must use the same key file.
+    pub encryption_key: Option<[u8; 32]>,
 }
 
 impl AppState {
@@ -37,11 +44,16 @@ impl AppState {
             node_name,
             peer_names: HashMap::new(),
             announced_to: HashSet::new(),
-            writing_files: HashSet::new(), // ← ADD THIS
-
+            writing_files: HashSet::new(),
             deleting_files: HashSet::new(),
             recently_notified: HashMap::new(),
+            encryption_key: None,
         }
+    }
+
+    /// Convenience: returns true if this node is running in encrypted mode.
+    pub fn is_encrypted(&self) -> bool {
+        self.encryption_key.is_some()
     }
 }
 
