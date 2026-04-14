@@ -1,6 +1,7 @@
 // src/main.rs
 mod crypto;
 mod gui;
+mod identity;
 mod network;
 mod state;
 mod storage;
@@ -80,7 +81,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 println!("  --http-port <port>      GUI HTTP port (default: 9000)");
                 println!("  --ws-port   <port>      GUI WebSocket port (default: 9001)");
                 println!("  --theme     <name>      GUI theme (default: vitruvius)");
-                println!("  --key-path  <file>      32-byte encryption key file (enables encryption)");
+                println!(
+                    "  --key-path  <file>      32-byte encryption key file (enables encryption)"
+                );
                 println!("  --generate-key <file>   Generate a new key file and exit");
                 println!();
                 println!("QUICK START (encrypted sync):");
@@ -106,24 +109,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // ── Load encryption key (optional) ───────────────────────────────────────
     let encryption_key: Option<[u8; 32]> = match key_path {
-        Some(ref path) => {
-            match crypto::load_key(path) {
-                Ok(key) => {
-                    println!(
-                        "🔐 Encryption enabled — key loaded from {}",
-                        path.display()
-                    );
-                    Some(key)
-                }
-                Err(e) => {
-                    eprintln!("ERROR: Cannot load key file: {e}");
-                    eprintln!("       Generate one with: vitruvius --generate-key vitruvius.key");
-                    std::process::exit(1);
-                }
+        Some(ref path) => match crypto::load_key(path) {
+            Ok(key) => {
+                println!("Encryption enabled — key loaded from {}", path.display());
+                Some(key)
             }
-        }
+            Err(e) => {
+                eprintln!("ERROR: Cannot load key file: {e}");
+                eprintln!("       Generate one with: vitruvius --generate-key vitruvius.key");
+                std::process::exit(1);
+            }
+        },
         None => {
-            println!("⚠  No --key-path given — running in plaintext mode.");
+            println!("  No --key-path given — running in plaintext mode.");
             println!("   Generate a key with: vitruvius --generate-key vitruvius.key");
             None
         }

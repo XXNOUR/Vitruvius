@@ -41,6 +41,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::PathBuf;
+use std::process::exit;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -107,9 +108,13 @@ pub async fn on_command(
             // Log encryption status when folder is set so the user knows the mode.
             let encrypted = state.lock().await.is_encrypted();
             if encrypted {
-                log(event_tx, "OK", "🔐 Encryption enabled — chunks will be encrypted before sending".into());
+                log(
+                    event_tx,
+                    "OK",
+                    "Encryption enabled — chunks will be encrypted before sending".into(),
+                );
             } else {
-                log(event_tx, "WARN", "⚠  No key loaded — running in plaintext mode. Use --key-path to enable encryption.".into());
+                log(event_tx, "WARN", "No key loaded — running in plaintext mode. Use --key-path to enable encryption.".into());
             }
 
             match storage::list_folder(&abs).await {
@@ -750,6 +755,7 @@ async fn on_response(
                                     chunk_index,
                                 },
                             );
+                            exit(1);
                             return;
                         }
                     }

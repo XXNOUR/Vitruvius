@@ -25,6 +25,7 @@ use chacha20poly1305::{
 use rand::TryRng;
 use std::fs;
 use std::path::Path;
+use tracing::warn;
 
 // ─── Generate a new key file ──────────────────────────────────────────────────
 // Writes 32 random bytes to the given path.
@@ -100,9 +101,15 @@ pub fn decrypt(key: &[u8; 32], data: &[u8]) -> Result<Vec<u8>> {
     let nonce = Nonce::from_slice(nonce_bytes);
     let cipher = ChaCha20Poly1305::new(key.into());
 
-    cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|_| anyhow!("Decryption failed — wrong key, or data was corrupted/tampered with"))
+    match cipher.decrypt(nonce, ciphertext) {
+        Ok(pt) => Ok(pt),
+        Err(_) => {
+            warn!("FATAL: Decryption failed — wrong key or tampered data");
+            return Err(anyhow!(
+                "Decryption failed — wrong key, or data was corrupted/tampered with"
+            ));
+        }
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
