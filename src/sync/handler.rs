@@ -1039,15 +1039,18 @@ async fn on_response(
             if ts.received_chunks.len() < total {
                 return;
             }
+            let dest_path = {
+                let meta = ts.metadata.as_ref().unwrap(); // safe: we checked len above
+                let mut p = ts.sync_dir.clone();
+                for component in meta.file_name.split('/') {
+                    p.push(component);
+                }
+                p
+            };
+            state.lock().await.writing_files.insert(dest_path.clone());
 
             match storage::reassemble(ts).await {
                 Ok(written_path) => {
-                    state
-                        .lock()
-                        .await
-                        .writing_files
-                        .insert(written_path.clone());
-
                     let fname = file_name.clone();
 
                     let _ = event_tx.send(GuiEvent::TransferComplete {
