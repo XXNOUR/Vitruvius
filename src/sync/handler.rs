@@ -215,6 +215,11 @@ pub async fn on_command(
                         node_name: node_name.to_string(),
                     },
                 );
+                // Request their manifest too — they may already have a folder.
+                swarm
+                    .behaviour_mut()
+                    .rr
+                    .send_request(&peer, SyncMessage::ManifestRequest);
                 log(
                     event_tx,
                     "INFO",
@@ -393,6 +398,12 @@ pub async fn on_swarm_event(
                     &peer_id,
                     SyncMessage::FolderAnnouncement { node_name: my_name },
                 );
+                // Also proactively request their manifest in case they already
+                // have a folder set and won't announce first.
+                swarm
+                    .behaviour_mut()
+                    .rr
+                    .send_request(&peer_id, SyncMessage::ManifestRequest);
                 log(
                     event_tx,
                     "INFO",
@@ -518,6 +529,16 @@ async fn on_request(
                 .behaviour_mut()
                 .rr
                 .send_response(channel, SyncMessage::Ack);
+
+            // ── THE MISSING REQUEST ───────────────────────────────────────────
+            // The peer just told us "I have files."  Actually request their
+            // manifest now so sync happens automatically without the user
+            // having to click "Request Sync" every time.
+            swarm
+                .behaviour_mut()
+                .rr
+                .send_request(&peer, SyncMessage::ManifestRequest);
+
             let (have_folder, my_name) = folder_status(state).await;
             if have_folder {
                 let already = state.lock().await.announced_to.contains(&peer);
@@ -1303,3 +1324,4 @@ async fn peer_display_name(state: &Arc<Mutex<AppState>>, pid_str: &str) -> Strin
         .cloned()
         .unwrap_or_else(|| format!("Node-{}", short_id(pid_str)))
 }
+
