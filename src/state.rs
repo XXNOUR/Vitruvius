@@ -35,6 +35,7 @@ pub struct AppState {
     pub peer_keys: HashMap<PeerId, [u8; 32]>,
     pub pending_exchanges: HashMap<PeerId, [u8; 32]>,
     pub encryption_key: Option<[u8; 32]>,
+    pub pending_approvals: HashMap<PeerId, [u8; 32]>,
 }
 
 impl AppState {
@@ -51,6 +52,7 @@ impl AppState {
             recently_notified: HashMap::new(),
             peer_keys: HashMap::new(),
             pending_exchanges: HashMap::new(),
+            pending_approvals: HashMap::new(),
             encryption_key: None,
         }
     }

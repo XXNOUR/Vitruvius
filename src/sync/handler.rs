@@ -41,7 +41,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::PathBuf;
-use std::process::exit;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -93,6 +92,63 @@ pub async fn on_command(
     node_name: &str,
 ) {
     match cmd {
+        GuiCommand::ApprovePeer { peer_id } => {
+            if let Ok(pid) = peer_id.parse::<PeerId>() {
+                let their_public = state.lock().await.pending_approvals.remove(&pid);
+                match their_public {
+                    None => {
+                        log(
+                            event_tx,
+                            "WARN",
+                            format!("No pending approval for {}", short_id(&peer_id)),
+                        );
+                    }
+                    Some(their_pub) => {
+                        let (our_secret, our_public) = tofu::generate_keypair();
+                        match tofu::derive_shared_key(&our_secret, &their_pub) {
+                            Ok(derived_key) => {
+                                let fingerprint = tofu::key_fingerprint(&derived_key);
+                                state.lock().await.set_peer_key(pid, derived_key);
+                                // Send our public key so initiator can derive the same key.
+                                swarm.behaviour_mut().rr.send_request(
+                                    &pid,
+                                    SyncMessage::KeyExchangeAccept {
+                                        public_key: our_public,
+                                    },
+                                );
+                                log(
+                                    event_tx,
+                                    "OK",
+                                    format!(
+                                        "Approved {} — key established | fingerprint: {}",
+                                        short_id(&peer_id),
+                                        fingerprint
+                                    ),
+                                );
+                            }
+                            Err(e) => {
+                                log(event_tx, "ERROR", format!("Key derivation failed: {e}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        GuiCommand::DenyPeer { peer_id } => {
+            if let Ok(pid) = peer_id.parse::<PeerId>() {
+                state.lock().await.pending_approvals.remove(&pid);
+                log(
+                    event_tx,
+                    "WARN",
+                    format!(
+                        "Denied sync request from {} — disconnecting",
+                        short_id(&peer_id)
+                    ),
+                );
+                let _ = swarm.disconnect_peer_id(pid);
+            }
+        }
         GuiCommand::SetFolder { path } => {
             let p = PathBuf::from(&path);
             if !p.exists() {
@@ -159,10 +215,6 @@ pub async fn on_command(
                         node_name: node_name.to_string(),
                     },
                 );
-                swarm
-                    .behaviour_mut()
-                    .rr
-                    .send_request(&peer, SyncMessage::ManifestRequest);
                 log(
                     event_tx,
                     "INFO",
@@ -341,10 +393,6 @@ pub async fn on_swarm_event(
                     &peer_id,
                     SyncMessage::FolderAnnouncement { node_name: my_name },
                 );
-                swarm
-                    .behaviour_mut()
-                    .rr
-                    .send_request(&peer_id, SyncMessage::ManifestRequest);
                 log(
                     event_tx,
                     "INFO",
@@ -470,10 +518,6 @@ async fn on_request(
                 .behaviour_mut()
                 .rr
                 .send_response(channel, SyncMessage::Ack);
-            swarm
-                .behaviour_mut()
-                .rr
-                .send_request(&peer, SyncMessage::ManifestRequest);
             let (have_folder, my_name) = folder_status(state).await;
             if have_folder {
                 let already = state.lock().await.announced_to.contains(&peer);
@@ -646,46 +690,96 @@ async fn on_request(
         SyncMessage::KeyExchangePropose {
             public_key: their_public,
         } => {
-            // They proposed — we generate our own keypair and respond.
-            let (our_secret, our_public) = tofu::generate_keypair();
-
-            // Derive the shared key immediately (we have both halves).
-            match tofu::derive_shared_key(&our_secret, &their_public) {
-                Ok(derived_key) => {
-                    let fingerprint = tofu::key_fingerprint(&derived_key);
-
-                    // Persist and store in memory.
-                    state.lock().await.set_peer_key(peer, derived_key);
-
-                    log(
-                        event_tx,
-                        "OK",
-                        format!(
-                            "TOFU: key exchange complete with {} | fingerprint: {}",
-                            short_id(pid_str),
-                            fingerprint,
-                        ),
-                    );
-                    log(
-                        event_tx,
-                        "INFO",
-                        "Compare fingerprints on both peers to verify no MITM. \
-                     (vitruvius --show-fingerprint)"
-                            .to_string(),
-                    );
-                }
-                Err(e) => {
-                    log(event_tx, "ERROR", format!("Key derivation failed: {e}"));
-                }
+            // Check if we already have a key for this peer — ignore duplicate proposals.
+            let already_keyed = {
+                let st = state.lock().await;
+                st.peer_keys.contains_key(&peer) || tofu::has_peer_key(pid_str)
+            };
+            if already_keyed {
+                log(
+                    event_tx,
+                    "INFO",
+                    format!(
+                        "Ignoring duplicate KeyExchangePropose from {}",
+                        short_id(pid_str)
+                    ),
+                );
+                let _ = swarm
+                    .behaviour_mut()
+                    .rr
+                    .send_response(channel, SyncMessage::Ack);
+                return;
             }
 
-            // Respond with our public key (the initiator needs it to derive the key).
-            let _ = swarm.behaviour_mut().rr.send_response(
-                channel,
-                SyncMessage::KeyExchangeAccept {
-                    public_key: our_public,
-                },
+            // Store their public key — don't derive anything yet.
+            // The user must explicitly approve this peer before we respond.
+            state
+                .lock()
+                .await
+                .pending_approvals
+                .insert(peer, their_public);
+
+            let display = peer_display_name(state, pid_str).await;
+            log(
+                event_tx,
+                "WARN",
+                format!(
+                    "Peer {} is requesting to sync — waiting for your approval",
+                    display
+                ),
             );
+
+            let _ = event_tx.send(GuiEvent::PeerApprovalRequired {
+                peer_id: pid_str.to_string(),
+                display_name: display,
+            });
+
+            // Don't send KeyExchangeAccept yet — we send Ack to keep the channel alive.
+            let _ = swarm
+                .behaviour_mut()
+                .rr
+                .send_response(channel, SyncMessage::Ack);
+        }
+        SyncMessage::KeyExchangeAccept {
+            public_key: their_public,
+        } => {
+            // We receive this when the remote peer's user approved us.
+            // Retrieve our ephemeral secret and derive the shared key.
+            let our_secret = state.lock().await.pending_exchanges.remove(&peer);
+            match our_secret {
+                None => {
+                    log(
+                        event_tx,
+                        "WARN",
+                        format!(
+                            "KeyExchangeAccept from {} but no pending exchange — ignoring",
+                            short_id(pid_str)
+                        ),
+                    );
+                }
+                Some(secret_bytes) => match tofu::derive_shared_key(&secret_bytes, &their_public) {
+                    Ok(derived_key) => {
+                        let fingerprint = tofu::key_fingerprint(&derived_key);
+                        state.lock().await.set_peer_key(peer, derived_key);
+                        log(
+                            event_tx,
+                            "OK",
+                            format!(
+                                "TOFU established with {} | fingerprint: {}",
+                                short_id(pid_str),
+                                fingerprint
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        log(event_tx, "ERROR", format!("Key derivation failed: {e}"));
+                    }
+                },
+            }
+            let _ = swarm
+                .behaviour_mut()
+                .rr
+                .send_response(channel, SyncMessage::Ack);
         }
 
         _ => {
@@ -834,7 +928,7 @@ async fn on_response(
             ref file_name,
             chunk_index,
             ref data,
-            hash,
+            hash: _,
         } => {
             let sync_path = match state.lock().await.sync_path.clone() {
                 Some(p) => p,
@@ -867,7 +961,6 @@ async fn on_response(
                                     chunk_index,
                                 },
                             );
-                            exit(1);
                             return;
                         }
                     }

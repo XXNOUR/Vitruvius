@@ -13,16 +13,29 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type")]
 pub enum GuiCommand {
     /// Set (or change) the local sync folder
-    SetFolder { path: String },
+    SetFolder {
+        path: String,
+    },
     /// Dial a peer — addr is optional when mDNS already knows it
     DialPeer {
         peer_id: String,
         addr: Option<String>,
     },
     /// Manually request the file list from a connected peer
-    RequestSync { peer_id: String },
+    RequestSync {
+        peer_id: String,
+    },
     /// Close the connection to a peer
-    Disconnect { peer_id: String },
+    Disconnect {
+        peer_id: String,
+    },
+
+    ApprovePeer {
+        peer_id: String,
+    },
+    DenyPeer {
+        peer_id: String,
+    },
 }
 
 // ─── Backend → Browser ────────────────────────────────────────────────────────
@@ -71,6 +84,11 @@ pub enum GuiEvent {
     // sends when the folder is set ,  to later on , set up the watcher
     /// A protocol-level error message from a peer
     PeerError { peer_id: String, message: String },
+
+    PeerApprovalRequired {
+        peer_id: String,
+        display_name: String,
+    },
     /// A log line — mirrors the tracing output into the GUI console
     Log { level: String, message: String },
 }

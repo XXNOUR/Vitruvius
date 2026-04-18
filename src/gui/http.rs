@@ -4,7 +4,7 @@ use tokio::net::TcpStream;
 fn get_html(theme: &str) -> &'static str {
     match theme {
         "gothic" => include_str!("../../gui/gothic.html"),
-        _ => include_str!("../../gui/vitruvius_gui.html"),
+        _ => include_str!("../../gui/vitruvius_gui_2.0.html"),
     }
 }
 
