@@ -6,6 +6,7 @@ mod network;
 mod state;
 mod storage;
 mod sync;
+mod tofu;
 mod watcher;
 
 use std::collections::HashMap;

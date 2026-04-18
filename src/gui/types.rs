@@ -5,10 +5,7 @@
 //   GuiEvent    — backend → browser  (state updates, log lines, transfer progress)
 //   GuiFileInfo — one row in a FolderListing
 
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 // ─── Browser → Backend ────────────────────────────────────────────────────────
 

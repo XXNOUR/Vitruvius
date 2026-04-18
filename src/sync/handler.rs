@@ -54,6 +54,7 @@ use crate::gui::{GuiCommand, GuiEvent, GuiFileInfo};
 use crate::network::{MyBehaviour, MyBehaviourEvent, SyncMessage};
 use crate::state::{short_id, AppState};
 use crate::storage::{self, FileMetadata, FileTransferState, PendingFile};
+use crate::tofu;
 
 /// Chunks in-flight per active file.
 const WINDOW: usize = 4;
@@ -353,6 +354,41 @@ pub async fn on_swarm_event(
                     ),
                 );
             }
+            let (no_global_key, already_have_key) = {
+                let st = state.lock().await;
+                let no_global = st.encryption_key.is_none();
+                let already = st.peer_keys.contains_key(&peer_id) || tofu::has_peer_key(&pid_str);
+                (no_global, already)
+            };
+            if no_global_key && !already_have_key {
+                let (secret_bytes, public_bytes) = tofu::generate_keypair();
+                state
+                    .lock()
+                    .await
+                    .pending_exchanges
+                    .insert(peer_id, secret_bytes);
+                swarm.behaviour_mut().rr.send_request(
+                    &peer_id,
+                    SyncMessage::KeyExchangePropose {
+                        public_key: public_bytes,
+                    },
+                );
+                log(
+                    event_tx,
+                    "INFO",
+                    format!("Initiating TOFU key exchange with {} …", short_id(&pid_str)),
+                );
+            } else if already_have_key {
+                // Load the persisted key back into memory for this session.
+                if let Some(key) = tofu::get_peer_key(&pid_str) {
+                    state.lock().await.peer_keys.insert(peer_id, key);
+                    log(
+                        event_tx,
+                        "OK",
+                        format!("Loaded stored TOFU key for {}", short_id(&pid_str)),
+                    );
+                }
+            }
         }
 
         SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
@@ -494,7 +530,7 @@ async fn on_request(
             // Grab both the sync path and the encryption key in one lock.
             let (path, enc_key) = {
                 let st = state.lock().await;
-                (st.sync_path.clone(), st.encryption_key)
+                (st.sync_path.clone(), st.key_for_peer(&peer))
             };
 
             match path {
@@ -515,7 +551,7 @@ async fn on_request(
                                 message: e.to_string(),
                             });
                     if matches!(resp, SyncMessage::ChunkResponse { .. }) {
-                        let enc_indicator = if enc_key.is_some() { "🔐" } else { "" };
+                        let enc_indicator = if enc_key.is_some() { "" } else { "" };
                         log(
                             event_tx,
                             "INFO",
@@ -607,6 +643,50 @@ async fn on_request(
                 }
             }
         }
+        SyncMessage::KeyExchangePropose {
+            public_key: their_public,
+        } => {
+            // They proposed — we generate our own keypair and respond.
+            let (our_secret, our_public) = tofu::generate_keypair();
+
+            // Derive the shared key immediately (we have both halves).
+            match tofu::derive_shared_key(&our_secret, &their_public) {
+                Ok(derived_key) => {
+                    let fingerprint = tofu::key_fingerprint(&derived_key);
+
+                    // Persist and store in memory.
+                    state.lock().await.set_peer_key(peer, derived_key);
+
+                    log(
+                        event_tx,
+                        "OK",
+                        format!(
+                            "TOFU: key exchange complete with {} | fingerprint: {}",
+                            short_id(pid_str),
+                            fingerprint,
+                        ),
+                    );
+                    log(
+                        event_tx,
+                        "INFO",
+                        "Compare fingerprints on both peers to verify no MITM. \
+                     (vitruvius --show-fingerprint)"
+                            .to_string(),
+                    );
+                }
+                Err(e) => {
+                    log(event_tx, "ERROR", format!("Key derivation failed: {e}"));
+                }
+            }
+
+            // Respond with our public key (the initiator needs it to derive the key).
+            let _ = swarm.behaviour_mut().rr.send_response(
+                channel,
+                SyncMessage::KeyExchangeAccept {
+                    public_key: our_public,
+                },
+            );
+        }
 
         _ => {
             let _ = swarm.behaviour_mut().rr.send_response(
@@ -634,6 +714,38 @@ async fn on_response(
 ) {
     match response {
         SyncMessage::Ack => {}
+        SyncMessage::KeyExchangeAccept {
+            public_key: their_public,
+        } => {
+            // We initiated — retrieve our pending secret and derive the shared key.
+            let our_secret = state.lock().await.pending_exchanges.remove(&peer);
+
+            match our_secret {
+                None => {
+                    log(event_tx, "WARN",
+                    format!("Received KeyExchangeAccept from {} but no pending exchange found — ignoring",
+                            short_id(pid_str)));
+                }
+                Some(secret_bytes) => match tofu::derive_shared_key(&secret_bytes, &their_public) {
+                    Ok(derived_key) => {
+                        let fingerprint = tofu::key_fingerprint(&derived_key);
+                        state.lock().await.set_peer_key(peer, derived_key);
+                        log(
+                            event_tx,
+                            "OK",
+                            format!(
+                                "TOFU: key exchange complete with {} | fingerprint: {}",
+                                short_id(pid_str),
+                                fingerprint,
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        log(event_tx, "ERROR", format!("Key derivation failed: {e}"));
+                    }
+                },
+            }
+        }
 
         SyncMessage::Manifest {
             node_name: peer_name,
@@ -733,7 +845,7 @@ async fn on_response(
             // Decrypt BEFORE hash verification. The hash in the manifest is a
             // plaintext hash, so we must have plaintext before we can verify it.
             // If no key is set, pass the data through unchanged (plaintext mode).
-            let enc_key = state.lock().await.encryption_key;
+            let enc_key = state.lock().await.key_for_peer(&peer);
             let plaintext = match enc_key {
                 Some(ref key) => {
                     match crypto::decrypt(key, data) {

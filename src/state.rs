@@ -32,6 +32,8 @@ pub struct AppState {
     /// Some  → all chunk data is encrypted before sending, decrypted on receipt.
     /// The key is loaded from disk at startup via --key-path and never changes
     /// at runtime. All peers must use the same key file.
+    pub peer_keys: HashMap<PeerId, [u8; 32]>,
+    pub pending_exchanges: HashMap<PeerId, [u8; 32]>,
     pub encryption_key: Option<[u8; 32]>,
 }
 
@@ -47,6 +49,8 @@ impl AppState {
             writing_files: HashSet::new(),
             deleting_files: HashSet::new(),
             recently_notified: HashMap::new(),
+            peer_keys: HashMap::new(),
+            pending_exchanges: HashMap::new(),
             encryption_key: None,
         }
     }
@@ -54,6 +58,16 @@ impl AppState {
     /// Convenience: returns true if this node is running in encrypted mode.
     pub fn is_encrypted(&self) -> bool {
         self.encryption_key.is_some()
+    }
+    pub fn key_for_peer(&self, peer: &libp2p::PeerId) -> Option<[u8; 32]> {
+        self.peer_keys.get(peer).copied().or(self.encryption_key)
+    }
+    pub fn set_peer_key(&mut self, peer: libp2p::PeerId, key: [u8; 32]) {
+        // Persist first — if the app crashes right after, we don't lose the key.
+        if let Err(e) = crate::tofu::store_peer_key(&peer.to_string(), &key) {
+            tracing::warn!("Could not persist TOFU key for {}: {}", peer, e);
+        }
+        self.peer_keys.insert(peer, key);
     }
 }
 

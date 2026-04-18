@@ -55,6 +55,15 @@ pub enum SyncMessage {
         file_name: String,
     },
 
+    KeyExchangePropose {
+        /// Raw 32-byte X25519 public key.
+        public_key: [u8; 32],
+    },
+    KeyExchangeAccept {
+        /// Raw 32-byte X25519 public key.
+        public_key: [u8; 32],
+    },
+
     // ── Notifications ─────────────────────────────────────────────────────────
     TransferComplete {
         file_name: String,
