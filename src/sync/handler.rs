@@ -420,23 +420,36 @@ pub async fn on_swarm_event(
                 (no_global, already)
             };
             if no_global_key && !already_have_key {
-                let (secret_bytes, public_bytes) = tofu::generate_keypair();
-                state
-                    .lock()
-                    .await
-                    .pending_exchanges
-                    .insert(peer_id, secret_bytes);
-                swarm.behaviour_mut().rr.send_request(
-                    &peer_id,
-                    SyncMessage::KeyExchangePropose {
-                        public_key: public_bytes,
-                    },
-                );
-                log(
-                    event_tx,
-                    "INFO",
-                    format!("Initiating TOFU key exchange with {} …", short_id(&pid_str)),
-                );
+                // Only the peer with the lexicographically lower PeerId initiates.
+                // This prevents both sides sending KeyExchangePropose simultaneously,
+                // which causes a race where both call set_peer_key twice with
+                // different ephemeral secrets, producing mismatched final keys.
+                let local_id = swarm.local_peer_id().to_string();
+                if local_id < pid_str {
+                    let (secret_bytes, public_bytes) = tofu::generate_keypair();
+                    state
+                        .lock()
+                        .await
+                        .pending_exchanges
+                        .insert(peer_id, secret_bytes);
+                    swarm.behaviour_mut().rr.send_request(
+                        &peer_id,
+                        SyncMessage::KeyExchangePropose {
+                            public_key: public_bytes,
+                        },
+                    );
+                    log(
+                        event_tx,
+                        "INFO",
+                        format!("Initiating TOFU key exchange with {} …", short_id(&pid_str)),
+                    );
+                } else {
+                    log(
+                        event_tx,
+                        "INFO",
+                        format!("Waiting for TOFU proposal from {} …", short_id(&pid_str)),
+                    );
+                }
             } else if already_have_key {
                 // Load the persisted key back into memory for this session.
                 if let Some(key) = tofu::get_peer_key(&pid_str) {
@@ -716,19 +729,42 @@ async fn on_request(
                 let st = state.lock().await;
                 st.peer_keys.contains_key(&peer) || tofu::has_peer_key(pid_str)
             };
+            // REPLACE WITH THIS:
             if already_keyed {
-                log(
-                    event_tx,
-                    "INFO",
-                    format!(
-                        "Ignoring duplicate KeyExchangePropose from {}",
-                        short_id(pid_str)
-                    ),
-                );
-                let _ = swarm
-                    .behaviour_mut()
-                    .rr
-                    .send_response(channel, SyncMessage::Ack);
+                // This peer is already trusted (in our TOFU store) but they are
+                // proposing a new exchange — meaning they lost their key store.
+                // Re-key silently without requiring user approval again: generate
+                // a new ephemeral pair, derive a fresh shared key, and respond
+                // with KeyExchangeAccept so both sides agree on the new key.
+                let (secret_bytes, our_public) = tofu::generate_keypair();
+                match tofu::derive_shared_key(&secret_bytes, &their_public) {
+                    Ok(derived_key) => {
+                        let fingerprint = tofu::key_fingerprint(&derived_key);
+                        state.lock().await.set_peer_key(peer, derived_key);
+                        let _ = swarm.behaviour_mut().rr.send_response(
+                            channel,
+                            SyncMessage::KeyExchangeAccept {
+                                public_key: our_public,
+                            },
+                        );
+                        log(
+                            event_tx,
+                            "OK",
+                            format!(
+                                "Re-keyed with already-trusted {} | fingerprint: {}",
+                                short_id(pid_str),
+                                fingerprint
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        log(event_tx, "ERROR", format!("Re-keying failed: {e}"));
+                        let _ = swarm
+                            .behaviour_mut()
+                            .rr
+                            .send_response(channel, SyncMessage::Ack);
+                    }
+                }
                 return;
             }
 
@@ -1324,4 +1360,3 @@ async fn peer_display_name(state: &Arc<Mutex<AppState>>, pid_str: &str) -> Strin
         .cloned()
         .unwrap_or_else(|| format!("Node-{}", short_id(pid_str)))
 }
-
