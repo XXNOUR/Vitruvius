@@ -21,7 +21,6 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{interval, Duration};
 use tracing::info;
-// First Commit by Riad
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -121,11 +120,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 std::process::exit(1);
             }
         },
-        None => {
-            println!("  No --key-path given — running in plaintext mode.");
-            println!("   Generate a key with: vitruvius --generate-key vitruvius.key");
-            None
-        }
+        None => None,
     };
 
     let node_name = get_node_name();

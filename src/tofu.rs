@@ -38,22 +38,40 @@ use anyhow::Result;
 use rand_core::OsRng;
 use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
 use x25519_dalek::{PublicKey, StaticSecret};
 
-const STORE_PATH: &str = "vitruvius_tofu.json";
+const STORE_FILE: &str = "vitruvius_tofu.json";
 
-// ─── Persistent store ─────────────────────────────────────────────────────────
+fn vitruvius_dir() -> PathBuf {
+    let mut p = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    p.push(".vitruvius");
+    fs::create_dir_all(&p).ok();
+    p
+}
+
+fn store_path() -> PathBuf {
+    vitruvius_dir().join(STORE_FILE)
+}
 
 fn load_store() -> HashMap<String, String> {
-    fs::read_to_string(STORE_PATH)
+    fs::read_to_string(store_path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
 fn save_store(store: &HashMap<String, String>) -> Result<()> {
+    let path = store_path();
     let json = serde_json::to_string_pretty(store)?;
-    fs::write(STORE_PATH, json)?;
+    fs::write(&path, json)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    }
+
     Ok(())
 }
 

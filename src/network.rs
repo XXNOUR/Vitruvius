@@ -77,7 +77,7 @@ pub struct MyBehaviour {
 }
 
 pub async fn setup_network() -> Result<Swarm<MyBehaviour>> {
-    let local_key = libp2p::identity::Keypair::generate_ed25519();
+    let local_key = crate::identity::load_or_create_keypair()?;
     let local_peer_id = PeerId::from(local_key.public());
     println!("--- Vitruvius Node ---");
     println!("YOUR ID: {}", local_peer_id);
@@ -111,3 +111,4 @@ pub async fn setup_network() -> Result<Swarm<MyBehaviour>> {
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
     Ok(swarm)
 }
+
