@@ -34,8 +34,6 @@
 //   The file is created on first exchange and updated on each new peer.
 //   Losing this file means all peers will re-exchange on next contact (safe).
 
-// REPLACE from the top of the file through save_store() with this:
-
 use anyhow::Result;
 use rand_core::OsRng;
 use std::collections::HashMap;

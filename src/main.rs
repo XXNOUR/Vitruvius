@@ -21,7 +21,6 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{interval, Duration};
 use tracing::info;
-// First Commit by Riad
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {

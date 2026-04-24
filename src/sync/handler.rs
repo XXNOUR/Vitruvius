@@ -729,7 +729,6 @@ async fn on_request(
                 let st = state.lock().await;
                 st.peer_keys.contains_key(&peer) || tofu::has_peer_key(pid_str)
             };
-            // REPLACE WITH THIS:
             if already_keyed {
                 // This peer is already trusted (in our TOFU store) but they are
                 // proposing a new exchange — meaning they lost their key store.
