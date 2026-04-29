@@ -31,7 +31,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut ws_port: u16 = 9001;
     let mut theme = String::default();
     let mut key_path: Option<PathBuf> = None;
+    let mut vault_key_path: Option<PathBuf> = None;
     let mut generate_key_path: Option<PathBuf> = None;
+    let mut vault_mode: bool = true; // on by default — zero-knowledge from first run
+    let mut encrypted_protocol: bool = true;
+    let mut import_args: Option<(PathBuf, PathBuf)> = None; // (src, dst)
+    let mut export_args: Option<(PathBuf, PathBuf)> = None; // (src.vit, dst)
 
     let mut i = 1;
     while i < args.len() {
@@ -54,46 +59,57 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     theme = v.clone();
                 }
             }
-            // --key-path <file>
-            // Load a 32-byte key file. All peers in the sync group must use the same file.
             "--key-path" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
                     key_path = Some(PathBuf::from(v));
                 }
             }
-            // --generate-key <file>
-            // Write a new random 32-byte key to <file> and exit.
-            // Run once, copy the file to all peers, then start each with --key-path.
             "--generate-key" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
                     generate_key_path = Some(PathBuf::from(v));
                 }
             }
+            "--vault" => {
+                vault_mode = true;
+            }
+            "--no-vault" => {
+                vault_mode = false;
+            }
+            "--no-encrypted-protocol" => {
+                encrypted_protocol = false;
+            }
+            "--vault-key" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    vault_key_path = Some(PathBuf::from(v));
+                }
+            }
+            "import" => {
+                let src = args.get(i + 1).cloned();
+                let dst = args.get(i + 2).cloned();
+                i += 2;
+                if let (Some(s), Some(d)) = (src, dst) {
+                    import_args = Some((PathBuf::from(s), PathBuf::from(d)));
+                } else {
+                    eprintln!("usage: vitruvius import <plaintext_dir> <vault_dir>");
+                    std::process::exit(2);
+                }
+            }
+            "export" => {
+                let src = args.get(i + 1).cloned();
+                let dst = args.get(i + 2).cloned();
+                i += 2;
+                if let (Some(s), Some(d)) = (src, dst) {
+                    export_args = Some((PathBuf::from(s), PathBuf::from(d)));
+                } else {
+                    eprintln!("usage: vitruvius export <file.vit> <plaintext_dest>");
+                    std::process::exit(2);
+                }
+            }
             "--help" | "-h" => {
-                println!("Vitruvius — zero-knowledge P2P file sync");
-                println!();
-                println!("USAGE:");
-                println!("  vitruvius [OPTIONS]");
-                println!();
-                println!("OPTIONS:");
-                println!("  --http-port <port>      GUI HTTP port (default: 9000)");
-                println!("  --ws-port   <port>      GUI WebSocket port (default: 9001)");
-                println!("  --theme     <name>      GUI theme (default: vitruvius)");
-                println!(
-                    "  --key-path  <file>      32-byte encryption key file (enables encryption)"
-                );
-                println!("  --generate-key <file>   Generate a new key file and exit");
-                println!();
-                println!("QUICK START (encrypted sync):");
-                println!("  # Step 1 — generate a key (run once on any machine)");
-                println!("  vitruvius --generate-key vitruvius.key");
-                println!();
-                println!("  # Step 2 — copy vitruvius.key to all peer machines");
-                println!();
-                println!("  # Step 3 — start Vitruvius on each peer with the key");
-                println!("  vitruvius --key-path vitruvius.key");
+                print_help();
                 return Ok(());
             }
             _ => {}
@@ -101,45 +117,89 @@ async fn main() -> Result<(), Box<dyn Error>> {
         i += 1;
     }
 
-    // ── --generate-key: write key file and exit ───────────────────────────────
+    // ── --generate-key ────────────────────────────────────────────────────────
     if let Some(ref path) = generate_key_path {
         crypto::generate_key(path)?;
         return Ok(());
     }
 
-    // ── Load encryption key (optional) ───────────────────────────────────────
-    let encryption_key: Option<[u8; 32]> = match key_path {
-        Some(ref path) => match crypto::load_key(path) {
+    // ── Load or auto-generate the transport key ─────────────────────────────
+    // --key-path overrides the default location; if no key file exists yet it
+    // is created automatically so the user never has to touch the terminal.
+    let shared_key_from_cli = key_path.is_some(); // true only when operator passed --key-path
+    let encryption_key: Option<[u8; 32]> = {
+        let path = key_path.unwrap_or_else(default_transport_key_path);
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            crypto::generate_key(&path)?;
+            println!("Transport key auto-generated at {}", path.display());
+            println!("Copy this file to every peer that should sync with this node.");
+        }
+        match crypto::load_key(&path) {
             Ok(key) => {
-                println!("Encryption enabled — key loaded from {}", path.display());
+                println!("Transport key loaded from {}", path.display());
                 Some(key)
             }
             Err(e) => {
-                eprintln!("ERROR: Cannot load key file: {e}");
-                eprintln!("       Generate one with: vitruvius --generate-key vitruvius.key");
+                eprintln!("ERROR: Cannot load transport key: {e}");
                 std::process::exit(1);
             }
-        },
-        None => None,
+        }
     };
+
+    // ── Load or auto-generate the vault (at-rest) key ────────────────────────
+    let vault_key: Option<[u8; 32]> = if vault_mode || import_args.is_some() || export_args.is_some() {
+        let path = vault_key_path.unwrap_or_else(default_vault_key_path);
+        if !path.exists() {
+            // Auto-generate on first use.
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            crypto::generate_key(&path)?;
+            println!("Vault key auto-generated at {}", path.display());
+        }
+        Some(crypto::load_key(&path)?)
+    } else {
+        None
+    };
+
+    // ── Subcommand: bulk-import plaintext folder into a vault folder ─────────
+    if let Some((src, dst)) = import_args {
+        let key = vault_key.expect("vault_key required for import");
+        let n = storage::import_plaintext_dir_into_vault(&src, &dst, &key)?;
+        println!("Imported {n} file(s) from {} into vault {}", src.display(), dst.display());
+        return Ok(());
+    }
+    if let Some((src, dst)) = export_args {
+        let key = vault_key.expect("vault_key required for export");
+        let bytes = storage::vault_export_to_plaintext(&src, &key, &dst)?;
+        println!("Exported {bytes} bytes to {}", dst.display());
+        return Ok(());
+    }
 
     let node_name = get_node_name();
     info!(
-        "Node: {} | HTTP :{} | WS :{} | THEME: {} | ENCRYPTED: {}",
+        "Node: {} | HTTP :{} | WS :{} | THEME: {} | TRANSPORT_KEY: {} | VAULT: {} | ENCRYPTED_PROTO: {}",
         node_name,
         http_port,
         ws_port,
         theme,
-        encryption_key.is_some()
+        encryption_key.is_some(),
+        vault_mode,
+        encrypted_protocol,
     );
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<gui::GuiEvent>();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<gui::GuiCommand>();
 
-    // Build AppState and store the encryption key inside it.
-    // From this point on, all code that needs the key reads it from state.
     let mut initial_state = AppState::new(node_name.clone());
     initial_state.encryption_key = encryption_key;
+    initial_state.shared_key_from_cli = shared_key_from_cli;
+    initial_state.vault_key = vault_key;
+    initial_state.vault_mode = vault_mode;
+    initial_state.encrypted_protocol = encrypted_protocol;
     let state = Arc::new(Mutex::new(initial_state));
 
     let (broadcast_tx, _) = tokio::sync::broadcast::channel::<String>(512);
@@ -276,4 +336,48 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
+}
+
+fn default_transport_key_path() -> PathBuf {
+    let mut p = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    p.push(".vitruvius");
+    p.push("transport.key");
+    p
+}
+
+fn default_vault_key_path() -> PathBuf {
+    let mut p = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    p.push(".vitruvius");
+    p.push("vault.key");
+    p
+}
+
+fn print_help() {
+    println!("Vitruvius — zero-knowledge P2P file sync");
+    println!();
+    println!("USAGE:");
+    println!("  vitruvius [OPTIONS]");
+    println!("  vitruvius --generate-key <file>");
+    println!("  vitruvius import <plaintext_dir> <vault_dir>   [--vault-key <path>]");
+    println!("  vitruvius export <file.vit> <plaintext_dest>   [--vault-key <path>]");
+    println!();
+    println!("DAEMON OPTIONS:");
+    println!("  --http-port <port>            GUI HTTP port (default 9000)");
+    println!("  --ws-port   <port>            GUI WebSocket port (default 9001)");
+    println!("  --theme     <name>            GUI theme");
+    println!("  --key-path  <file>            Transport key path (default: ~/.vitruvius/transport.key, auto-generated)");
+    println!("  --vault                       Enable vault mode — on by default");
+    println!("  --no-vault                    Disable vault mode (plaintext on disk)");
+    println!("  --vault-key <file>            Path to vault (at-rest) key (default: ~/.vitruvius/vault.key, auto-generated)");
+    println!("  --no-encrypted-protocol       Force legacy plaintext-protocol (debugging only)");
+    println!();
+    println!("ZERO-KNOWLEDGE GUARANTEES (when transport key + vault are enabled):");
+    println!("  In transit  — chunks are AEAD-protected; AAD binds (file_id, chunk_index)");
+    println!("  In metadata — manifest is encrypted; filenames, sizes, hashes never leak");
+    println!("  At rest     — files are stored as *.vit blobs encrypted with the vault key");
+    println!();
+    println!("QUICK DEMO:");
+    println!("  vitruvius --generate-key vitruvius.key");
+    println!("  vitruvius import ~/docs ~/vault              # bulk-encrypt existing files");
+    println!("  vitruvius --key-path vitruvius.key --vault  # start the encrypted node");
 }

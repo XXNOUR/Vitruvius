@@ -51,7 +51,7 @@ use tracing::{error, info, warn};
 use crate::crypto;
 use crate::gui::{GuiCommand, GuiEvent, GuiFileInfo};
 use crate::network::{MyBehaviour, MyBehaviourEvent, SyncMessage};
-use crate::state::{short_id, AppState};
+use crate::state::{short_id, AppState, InboundFileInfo};
 use crate::storage::{self, FileMetadata, FileTransferState, PendingFile};
 use crate::tofu;
 
@@ -279,6 +279,80 @@ pub async fn on_command(
                 let _ = swarm.disconnect_peer_id(pid);
             }
         }
+
+        GuiCommand::DecryptFile { name, dest } => {
+            // Resolve <sync>/<name>.vit and write decrypted plaintext to `dest`.
+            let (sync_path, vault_key) = {
+                let st = state.lock().await;
+                (st.sync_path.clone(), st.vault_key)
+            };
+            let key = match vault_key {
+                Some(k) => k,
+                None => {
+                    log(
+                        event_tx,
+                        "ERROR",
+                        "DecryptFile: no vault key loaded — start with --vault".into(),
+                    );
+                    return;
+                }
+            };
+            let folder = match sync_path {
+                Some(p) => p,
+                None => {
+                    log(event_tx, "ERROR", "DecryptFile: no sync folder set".into());
+                    return;
+                }
+            };
+            let mut vault_path = folder.clone();
+            for c in name.split('/') {
+                vault_path.push(c);
+            }
+            let new_name = format!("{}.vit", vault_path.file_name().unwrap().to_string_lossy());
+            vault_path.set_file_name(new_name);
+            if !vault_path.exists() {
+                log(
+                    event_tx,
+                    "ERROR",
+                    format!("DecryptFile: {} not found", vault_path.display()),
+                );
+                return;
+            }
+            let dest_path = std::path::PathBuf::from(&dest);
+            match storage::vault_export_to_plaintext(&vault_path, &key, &dest_path) {
+                Ok(n) => {
+                    log(
+                        event_tx,
+                        "OK",
+                        format!("Decrypted {name} → {dest} ({n} bytes)"),
+                    );
+                    // Refresh the file listing so the decrypted file appears in the GUI.
+                    let (vault_mode, vk) = {
+                        let st = state.lock().await;
+                        (st.vault_mode, st.vault_key)
+                    };
+                    if let Ok(files) =
+                        storage::list_folder_modal(&folder, vault_mode, vk.as_ref()).await
+                    {
+                        let listing = files
+                            .iter()
+                            .map(|f| crate::gui::GuiFileInfo {
+                                name: f.file_name.clone(),
+                                size: f.file_size,
+                                chunks: f.total_chunks,
+                            })
+                            .collect();
+                        let _ =
+                            event_tx.send(crate::gui::GuiEvent::FolderListing { files: listing });
+                    }
+                }
+                Err(e) => log(
+                    event_tx,
+                    "ERROR",
+                    format!("DecryptFile failed for {name}: {e}"),
+                ),
+            }
+        }
     }
 }
 
@@ -325,14 +399,19 @@ pub async fn check_stalls(
             );
 
             let to_req = missing.len().min(WINDOW);
+            let file_id_opt = ts.file_id;
             for &ci in missing.iter().take(to_req) {
-                swarm.behaviour_mut().rr.send_request(
-                    peer,
-                    SyncMessage::ChunkRequest {
+                let req = match file_id_opt {
+                    Some(file_id) => SyncMessage::EncryptedChunkRequest {
+                        file_id,
+                        chunk_index: ci as u32,
+                    },
+                    None => SyncMessage::ChunkRequest {
                         file_name: file_name.clone(),
                         chunk_index: ci,
                     },
-                );
+                };
+                swarm.behaviour_mut().rr.send_request(peer, req);
             }
             if let Some(&last_ci) = missing.iter().take(to_req).last() {
                 ts.next_request = ts.next_request.max(last_ci + 1);
@@ -391,35 +470,69 @@ pub async fn on_swarm_event(
             });
             log(event_tx, "OK", format!("Connected to {display}"));
 
+            // ── Load stored TOFU key BEFORE doing anything else ───────────────
+            // This must happen first so that ManifestRequest is encrypted with
+            // the correct key. Loading it after sending the request caused a race
+            // where the manifest was sent with no key and decryption failed.
+            let already_have_key = {
+                let mut st = state.lock().await;
+                let already = st.peer_keys.contains_key(&peer_id);
+                if !already {
+                    if let Some(key) = tofu::get_peer_key(&pid_str) {
+                        st.peer_keys.insert(peer_id, key);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    true
+                }
+            };
+            if already_have_key {
+                log(
+                    event_tx,
+                    "OK",
+                    format!("Loaded stored TOFU key for {}", short_id(&pid_str)),
+                );
+            }
+
             let (have_folder, my_name) = folder_status(&state).await;
+            let use_tofu = !state.lock().await.shared_key_from_cli;
+
             if have_folder {
                 state.lock().await.announced_to.insert(peer_id);
                 swarm.behaviour_mut().rr.send_request(
                     &peer_id,
                     SyncMessage::FolderAnnouncement { node_name: my_name },
                 );
-                // Also proactively request their manifest in case they already
-                // have a folder set and won't announce first.
-                swarm
-                    .behaviour_mut()
-                    .rr
-                    .send_request(&peer_id, SyncMessage::ManifestRequest);
-                log(
-                    event_tx,
-                    "INFO",
-                    format!(
-                        "Folder already set — announced to {} and requesting their manifest",
-                        short_id(&pid_str)
-                    ),
-                );
+                // Only send ManifestRequest immediately if we already have a key.
+                // If TOFU is needed, the request is sent after key exchange completes.
+                if already_have_key || !use_tofu {
+                    swarm
+                        .behaviour_mut()
+                        .rr
+                        .send_request(&peer_id, SyncMessage::ManifestRequest);
+                    log(
+                        event_tx,
+                        "INFO",
+                        format!(
+                            "Folder already set — announced to {} and requesting their manifest",
+                            short_id(&pid_str)
+                        ),
+                    );
+                } else {
+                    log(
+                        event_tx,
+                        "INFO",
+                        format!(
+                            "Folder set — waiting for TOFU with {} before requesting manifest",
+                            short_id(&pid_str)
+                        ),
+                    );
+                }
             }
-            let (no_global_key, already_have_key) = {
-                let st = state.lock().await;
-                let no_global = st.encryption_key.is_none();
-                let already = st.peer_keys.contains_key(&peer_id) || tofu::has_peer_key(&pid_str);
-                (no_global, already)
-            };
-            if no_global_key && !already_have_key {
+
+            if use_tofu && !already_have_key {
                 // Only the peer with the lexicographically lower PeerId initiates.
                 // This prevents both sides sending KeyExchangePropose simultaneously,
                 // which causes a race where both call set_peer_key twice with
@@ -450,17 +563,8 @@ pub async fn on_swarm_event(
                         format!("Waiting for TOFU proposal from {} …", short_id(&pid_str)),
                     );
                 }
-            } else if already_have_key {
-                // Load the persisted key back into memory for this session.
-                if let Some(key) = tofu::get_peer_key(&pid_str) {
-                    state.lock().await.peer_keys.insert(peer_id, key);
-                    log(
-                        event_tx,
-                        "OK",
-                        format!("Loaded stored TOFU key for {}", short_id(&pid_str)),
-                    );
-                }
             }
+            // (stored key was already loaded at the top of ConnectionEstablished)
         }
 
         SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
@@ -547,11 +651,17 @@ async fn on_request(
             // The peer just told us "I have files."  Actually request their
             // manifest now so sync happens automatically without the user
             // having to click "Request Sync" every time.
-            swarm
-                .behaviour_mut()
-                .rr
-                .send_request(&peer, SyncMessage::ManifestRequest);
-
+            //
+            let is_trusted = {
+                let st = state.lock().await;
+                st.peer_keys.contains_key(&peer) || tofu::has_peer_key(pid_str)
+            };
+            if is_trusted {
+                swarm
+                    .behaviour_mut()
+                    .rr
+                    .send_request(&peer, SyncMessage::ManifestRequest);
+            }
             let (have_folder, my_name) = folder_status(state).await;
             if have_folder {
                 let already = state.lock().await.announced_to.contains(&peer);
@@ -566,9 +676,29 @@ async fn on_request(
         }
 
         SyncMessage::ManifestRequest => {
-            let (path, my_name) = {
+            // Mirror the operator-shared key into the per-peer table ONLY when
+            // it was explicitly distributed via --key-path. Auto-generated keys
+            // must not be mirrored — each peer has a different one; TOFU handles
+            // establishing the real shared key.
+            {
+                let mut st = state.lock().await;
+                if !st.peer_keys.contains_key(&peer)
+                    && st.encryption_key.is_some()
+                    && st.shared_key_from_cli
+                {
+                    st.mirror_shared_key(peer);
+                }
+            }
+            let (path, my_name, peer_key, vault_mode, vault_key, encrypted_protocol) = {
                 let st = state.lock().await;
-                (st.sync_path.clone(), st.node_name.clone())
+                (
+                    st.sync_path.clone(),
+                    st.node_name.clone(),
+                    st.key_for_peer(&peer),
+                    st.vault_mode,
+                    st.vault_key,
+                    st.encrypted_protocol,
+                )
             };
             match path {
                 None => {
@@ -586,19 +716,101 @@ async fn on_request(
                         .send_response(channel, SyncMessage::Empty);
                 }
                 Some(ref p) => {
-                    log(
-                        event_tx,
-                        "INFO",
-                        format!("{} requested our manifest", short_id(pid_str)),
-                    );
-                    let resp: SyncMessage = storage::get_manifest(p, &my_name)
+                    if encrypted_protocol && peer_key.is_some() {
+                        let key = peer_key.unwrap();
+                        log(
+                            event_tx,
+                            "INFO",
+                            format!(
+                                "{} requested our manifest — sending ENCRYPTED",
+                                short_id(pid_str)
+                            ),
+                        );
+                        let (resp, id_map) = match storage::get_encrypted_manifest(
+                            p,
+                            &my_name,
+                            &key,
+                            vault_mode,
+                            vault_key.as_ref(),
+                        )
                         .await
-                        .unwrap_or_else(|e: anyhow::Error| SyncMessage::Error {
-                            message: e.to_string(),
-                        });
-                    let _ = swarm.behaviour_mut().rr.send_response(channel, resp);
+                        {
+                            Ok((m, ids)) => (m, ids),
+                            Err(e) => {
+                                let _ = swarm.behaviour_mut().rr.send_response(
+                                    channel,
+                                    SyncMessage::Error {
+                                        message: e.to_string(),
+                                    },
+                                );
+                                return;
+                            }
+                        };
+                        // Remember which file_ids we just told this peer about
+                        // so we can resolve their EncryptedChunkRequest.
+                        state.lock().await.outbound_file_ids.insert(peer, id_map);
+                        let _ = swarm.behaviour_mut().rr.send_response(channel, resp);
+                    } else {
+                        log(
+                            event_tx,
+                            "INFO",
+                            format!("{} requested our manifest (plaintext)", short_id(pid_str)),
+                        );
+                        let resp: SyncMessage = storage::get_manifest(p, &my_name)
+                            .await
+                            .unwrap_or_else(|e: anyhow::Error| SyncMessage::Error {
+                                message: e.to_string(),
+                            });
+                        let _ = swarm.behaviour_mut().rr.send_response(channel, resp);
+                    }
                 }
             }
+        }
+
+        SyncMessage::EncryptedChunkRequest {
+            file_id,
+            chunk_index,
+        } => {
+            let (path, peer_key, vault_mode, vault_key, rel_path) = {
+                let st = state.lock().await;
+                let rel = st
+                    .outbound_file_ids
+                    .get(&peer)
+                    .and_then(|m| m.get(&file_id).cloned());
+                (
+                    st.sync_path.clone(),
+                    st.key_for_peer(&peer),
+                    st.vault_mode,
+                    st.vault_key,
+                    rel,
+                )
+            };
+            let resp = match (path, peer_key, rel_path) {
+                (Some(p), Some(key), Some(rel)) => storage::get_encrypted_chunk(
+                    &p,
+                    &rel,
+                    file_id,
+                    chunk_index,
+                    &key,
+                    vault_mode,
+                    vault_key.as_ref(),
+                )
+                .await
+                .unwrap_or_else(|e| SyncMessage::Error {
+                    message: e.to_string(),
+                }),
+                _ => SyncMessage::Error {
+                    message: "Encrypted chunk request: missing key/folder/id mapping".into(),
+                },
+            };
+            if matches!(resp, SyncMessage::EncryptedChunkResponse { .. }) {
+                log(
+                    event_tx,
+                    "INFO",
+                    format!("→ encrypted chunk [{chunk_index}] to {}", short_id(pid_str)),
+                );
+            }
+            let _ = swarm.behaviour_mut().rr.send_response(channel, resp);
         }
 
         SyncMessage::ChunkRequest {
@@ -693,7 +905,6 @@ async fn on_request(
                     .send_request(&peer, SyncMessage::ManifestRequest);
             }
         }
-
         SyncMessage::FileDeleted { ref file_name } => {
             let _ = swarm
                 .behaviour_mut()
@@ -706,6 +917,18 @@ async fn on_request(
                 for component in file_name.split('/') {
                     full_path.push(component);
                 }
+
+                // Insert into deleting_files BEFORE removing so the file
+                // watcher recognises this as a remote-initiated deletion and
+                // does not echo it back to the peer (which would start a loop).
+                state.lock().await.deleting_files.insert(full_path.clone());
+                let state2 = Arc::clone(state);
+                let guarded_path = full_path.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(2000)).await;
+                    state2.lock().await.deleting_files.remove(&guarded_path);
+                });
+
                 if let Err(e) = std::fs::remove_file(&full_path) {
                     log(
                         event_tx,
@@ -721,6 +944,7 @@ async fn on_request(
                 }
             }
         }
+
         SyncMessage::KeyExchangePropose {
             public_key: their_public,
         } => {
@@ -730,40 +954,43 @@ async fn on_request(
                 st.peer_keys.contains_key(&peer) || tofu::has_peer_key(pid_str)
             };
             if already_keyed {
-                // This peer is already trusted (in our TOFU store) but they are
-                // proposing a new exchange — meaning they lost their key store.
-                // Re-key silently without requiring user approval again: generate
-                // a new ephemeral pair, derive a fresh shared key, and respond
-                // with KeyExchangeAccept so both sides agree on the new key.
-                let (secret_bytes, our_public) = tofu::generate_keypair();
-                match tofu::derive_shared_key(&secret_bytes, &their_public) {
-                    Ok(derived_key) => {
-                        let fingerprint = tofu::key_fingerprint(&derived_key);
-                        state.lock().await.set_peer_key(peer, derived_key);
-                        let _ = swarm.behaviour_mut().rr.send_response(
-                            channel,
-                            SyncMessage::KeyExchangeAccept {
-                                public_key: our_public,
-                            },
-                        );
-                        log(
-                            event_tx,
-                            "OK",
-                            format!(
-                                "Re-keyed with already-trusted {} | fingerprint: {}",
-                                short_id(pid_str),
-                                fingerprint
-                            ),
-                        );
-                    }
-                    Err(e) => {
-                        log(event_tx, "ERROR", format!("Re-keying failed: {e}"));
-                        let _ = swarm
-                            .behaviour_mut()
-                            .rr
-                            .send_response(channel, SyncMessage::Ack);
-                    }
-                }
+                // SECURITY FIX: do NOT silently accept a re-key from a
+                // peer we
+                // already trust. Silent acceptance would let a MITM or a
+                // compromised peer quietly replace the shared key without
+                // the
+                // user knowing. Route through the normal approval flow
+                // instead,
+                // but flag it clearly so the user can make an informed
+                // decision.
+                state
+                    .lock()
+                    .await
+                    .pending_approvals
+                    .insert(peer, their_public);
+
+                let display = peer_display_name(state, pid_str).await;
+                log(
+                    event_tx,
+                    "WARN",
+                    format!(
+                        "SECURITY: already-trusted peer {} is proposing aNEW key \
+                            exchange. This could be a legitimate re-key after
+  key loss, \
+                             or a MITM attempt. Approve ONLY if you recognise
+  this device.",
+                        display
+                    ),
+                );
+                let _ = event_tx.send(GuiEvent::PeerApprovalRequired {
+                    peer_id: pid_str.to_string(),
+                    display_name: format!("⚠ RE-KEY: {display}"),
+                });
+                // Send Ack to keep the channel alive; do not accept yet.
+                let _ = swarm
+                    .behaviour_mut()
+                    .rr
+                    .send_response(channel, SyncMessage::Ack);
                 return;
             }
 
@@ -889,12 +1116,156 @@ async fn on_response(
                                 fingerprint,
                             ),
                         );
+                        // Key is now established — request the manifest so sync
+                        // starts automatically without the user having to click again.
+                        let has_folder = state.lock().await.sync_path.is_some();
+                        if has_folder {
+                            swarm
+                                .behaviour_mut()
+                                .rr
+                                .send_request(&peer, SyncMessage::ManifestRequest);
+                            log(
+                                event_tx,
+                                "INFO",
+                                format!(
+                                    "TOFU complete — requesting manifest from {} …",
+                                    short_id(pid_str)
+                                ),
+                            );
+                        }
                     }
                     Err(e) => {
                         log(event_tx, "ERROR", format!("Key derivation failed: {e}"));
                     }
                 },
             }
+        }
+
+        SyncMessage::EncryptedManifest { ciphertext } => {
+            let peer_key = state.lock().await.key_for_peer(&peer);
+            let key = match peer_key {
+                Some(k) => k,
+                None => {
+                    log(
+                        event_tx,
+                        "WARN",
+                        format!(
+                            "EncryptedManifest from {} but no transport key — ignoring",
+                            short_id(pid_str)
+                        ),
+                    );
+                    return;
+                }
+            };
+            let payload = match storage::decrypt_manifest(&key, &ciphertext) {
+                Ok(p) => p,
+                Err(e) => {
+                    log(
+                        event_tx,
+                        "ERROR",
+                        format!("Manifest decrypt failed from {}: {e}", short_id(pid_str)),
+                    );
+                    return;
+                }
+            };
+            let peer_name = payload.node_name.clone();
+            state
+                .lock()
+                .await
+                .peer_names
+                .insert(pid_str.to_string(), peer_name.clone());
+
+            if payload.files.is_empty() {
+                log(
+                    event_tx,
+                    "INFO",
+                    format!("{peer_name} encrypted manifest had no files"),
+                );
+                return;
+            }
+
+            let (sync_path, vault_mode) = {
+                let st = state.lock().await;
+                (st.sync_path.clone(), st.vault_mode)
+            };
+            let sync_path = match sync_path {
+                Some(p) => p,
+                None => {
+                    log(
+                        event_tx,
+                        "WARN",
+                        "Received encrypted manifest but no sync folder set!".into(),
+                    );
+                    return;
+                }
+            };
+
+            // Cache id → InboundFileInfo so we can later look up filenames
+            // when EncryptedChunkResponse arrives.
+            let mut info_map: HashMap<[u8; 16], InboundFileInfo> = HashMap::new();
+            for fe in &payload.files {
+                info_map.insert(
+                    fe.file_id,
+                    InboundFileInfo {
+                        file_name: fe.file_name.clone(),
+                        file_size: fe.file_size,
+                        total_chunks: fe.total_chunks,
+                        blinded_chunk_hashes: fe.blinded_chunk_hashes.clone(),
+                    },
+                );
+            }
+            state.lock().await.inbound_file_ids.insert(peer, info_map);
+
+            let dl = transfers.entry(peer).or_insert_with(PeerDownload::new);
+            let mut newly_queued = 0usize;
+            for fe in &payload.files {
+                if rel_path_exists(&sync_path, &fe.file_name) {
+                    continue;
+                }
+                if vault_mode && vault_path_exists(&sync_path, &fe.file_name) {
+                    continue;
+                }
+                if dl.active.contains_key(&fe.file_name) {
+                    continue;
+                }
+                if dl.queue.iter().any(|p| p.file_name == fe.file_name) {
+                    continue;
+                }
+
+                dl.queue.push_back(PendingFile {
+                    file_name: fe.file_name.clone(),
+                    total_chunks: fe.total_chunks as usize,
+                    file_size: fe.file_size,
+                    // For encrypted-protocol files, chunk_hashes carries the
+                    // BLINDED hashes — receiver verifies against these via
+                    // verify_chunk_blinded(plaintext, expected, transport_key).
+                    chunk_hashes: fe.blinded_chunk_hashes.clone(),
+                    file_id: Some(fe.file_id),
+                });
+                newly_queued += 1;
+            }
+
+            let total_pending = dl.active.len() + dl.queue.len();
+            if total_pending == 0 {
+                log(
+                    event_tx,
+                    "OK",
+                    format!("All files from {peer_name} already synced"),
+                );
+                return;
+            }
+
+            log(
+                event_tx,
+                "INFO",
+                format!(
+                    "{peer_name} (encrypted): {newly_queued} file(s) queued ({} active, {} waiting)",
+                    dl.active.len(),
+                    dl.queue.len()
+                ),
+            );
+
+            start_queued_files(peer, &sync_path, dl, swarm, event_tx, pid_str);
         }
 
         SyncMessage::Manifest {
@@ -1105,7 +1476,11 @@ async fn on_response(
             };
             state.lock().await.writing_files.insert(dest_path.clone());
 
-            match storage::reassemble(ts).await {
+            let (vm_done, vk_done) = {
+                let st = state.lock().await;
+                (st.vault_mode, st.vault_key)
+            };
+            match storage::reassemble_modal(ts, vm_done, vk_done.as_ref()).await {
                 Ok(written_path) => {
                     let fname = file_name.clone();
 
@@ -1151,6 +1526,191 @@ async fn on_response(
                     }
                 }
 
+                Err(e) => {
+                    error!("Reassembly error for {file_name}: {e}");
+                    log(
+                        event_tx,
+                        "ERROR",
+                        format!("Failed to write {file_name}: {e}"),
+                    );
+                }
+            }
+        }
+
+        SyncMessage::EncryptedChunkResponse {
+            file_id,
+            chunk_index,
+            ref data,
+            blinded_hash: _,
+        } => {
+            let (sync_path, vault_mode, vault_key, peer_key) = {
+                let st = state.lock().await;
+                (
+                    st.sync_path.clone(),
+                    st.vault_mode,
+                    st.vault_key,
+                    st.key_for_peer(&peer),
+                )
+            };
+            let sync_path = match sync_path {
+                Some(p) => p,
+                None => return,
+            };
+            let key = match peer_key {
+                Some(k) => k,
+                None => {
+                    log(
+                        event_tx,
+                        "ERROR",
+                        format!(
+                            "EncryptedChunkResponse from {} but no transport key",
+                            short_id(pid_str)
+                        ),
+                    );
+                    return;
+                }
+            };
+            // Resolve file_name from inbound id map.
+            let file_name = match state
+                .lock()
+                .await
+                .inbound_file_ids
+                .get(&peer)
+                .and_then(|m| m.get(&file_id))
+                .map(|i| i.file_name.clone())
+            {
+                Some(n) => n,
+                None => {
+                    log(
+                        event_tx,
+                        "WARN",
+                        format!("Unknown file_id from {}", short_id(pid_str)),
+                    );
+                    return;
+                }
+            };
+
+            let aad = crypto::chunk_aad(&file_id, chunk_index);
+            let plaintext = match crypto::decrypt_with_aad(&key, data, &aad) {
+                Ok(pt) => pt,
+                Err(e) => {
+                    log(
+                        event_tx,
+                        "ERROR",
+                        format!("AEAD-decrypt failed for {file_name} chunk {chunk_index}: {e}"),
+                    );
+                    swarm.behaviour_mut().rr.send_request(
+                        &peer,
+                        SyncMessage::EncryptedChunkRequest {
+                            file_id,
+                            chunk_index,
+                        },
+                    );
+                    return;
+                }
+            };
+            let chunk_index_us = chunk_index as usize;
+
+            let dl = match transfers.get_mut(&peer) {
+                Some(d) => d,
+                None => return,
+            };
+            let ts = match dl.active.get_mut(&file_name) {
+                Some(t) => t,
+                None => return,
+            };
+
+            let expected_blinded: Option<[u8; 32]> = ts
+                .metadata
+                .as_ref()
+                .and_then(|m| m.chunk_hashes.get(chunk_index_us))
+                .copied();
+            let verified = expected_blinded
+                .map(|h| storage::verify_chunk_blinded(&plaintext, &h, &key))
+                .unwrap_or(false);
+            let total = ts.metadata.as_ref().map(|m| m.total_chunks).unwrap_or(0);
+
+            let _ = event_tx.send(GuiEvent::ChunkReceived {
+                peer_id: pid_str.to_string(),
+                file_name: file_name.clone(),
+                chunk_index: chunk_index_us,
+                total_chunks: total,
+                verified,
+            });
+
+            if !verified {
+                log(
+                    event_tx,
+                    "ERROR",
+                    format!("{file_name} chunk {chunk_index_us} BLINDED hash mismatch — retrying"),
+                );
+                swarm.behaviour_mut().rr.send_request(
+                    &peer,
+                    SyncMessage::EncryptedChunkRequest {
+                        file_id,
+                        chunk_index,
+                    },
+                );
+                return;
+            }
+
+            ts.received_chunks.insert(chunk_index_us, plaintext);
+            ts.last_activity = std::time::Instant::now();
+
+            if ts.next_request < total {
+                swarm.behaviour_mut().rr.send_request(
+                    &peer,
+                    SyncMessage::EncryptedChunkRequest {
+                        file_id,
+                        chunk_index: ts.next_request as u32,
+                    },
+                );
+                ts.next_request += 1;
+            }
+
+            log(
+                event_tx,
+                "INFO",
+                format!("{file_name}  {}/{total} (enc)", chunk_index_us + 1),
+            );
+
+            if ts.received_chunks.len() < total {
+                return;
+            }
+
+            let dest_path = {
+                let meta = ts.metadata.as_ref().unwrap();
+                let mut p = ts.sync_dir.clone();
+                for component in meta.file_name.split('/') {
+                    p.push(component);
+                }
+                p
+            };
+            state.lock().await.writing_files.insert(dest_path.clone());
+
+            match storage::reassemble_modal(ts, vault_mode, vault_key.as_ref()).await {
+                Ok(written_path) => {
+                    let _ = event_tx.send(GuiEvent::TransferComplete {
+                        peer_id: pid_str.to_string(),
+                        file_name: file_name.clone(),
+                    });
+                    log(event_tx, "OK", format!("  {file_name} saved to disk"));
+
+                    swarm.behaviour_mut().rr.send_request(
+                        &peer,
+                        SyncMessage::TransferComplete {
+                            file_name: file_name.clone(),
+                        },
+                    );
+                    dl.active.remove(&file_name);
+                    start_queued_files(peer, &sync_path, dl, swarm, event_tx, pid_str);
+
+                    let state2 = Arc::clone(state);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                        state2.lock().await.writing_files.remove(&written_path);
+                    });
+                }
                 Err(e) => {
                     error!("Reassembly error for {file_name}: {e}");
                     log(
@@ -1221,20 +1781,28 @@ fn start_queued_files(
             file_size: pf.file_size,
             chunk_hashes: pf.chunk_hashes.clone(),
         });
+        ts.file_id = pf.file_id;
 
+        // Local dedup is only meaningful when both the manifest's hashes and
+        // the local index speak the same hash space, which is plaintext-mode
+        // legacy. Skip dedup for encrypted-protocol files (blinded hashes)
+        // and for vault-mode (files at rest are *.vit blobs).
+        let dedup_eligible = pf.file_id.is_none();
         let mut local_hits = 0usize;
-        for (chunk_index, hash) in pf.chunk_hashes.iter().enumerate() {
-            if let Some((src_file, src_chunk)) = index.get(hash) {
-                let sp = sync_path.clone();
-                let src_file = src_file.clone();
-                let src_chunk = *src_chunk;
-                let data = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(storage::read_local_chunk(&sp, &src_file, src_chunk))
-                });
-                if let Some(bytes) = data {
-                    ts.received_chunks.insert(chunk_index, bytes);
-                    local_hits += 1;
+        if dedup_eligible {
+            for (chunk_index, hash) in pf.chunk_hashes.iter().enumerate() {
+                if let Some((src_file, src_chunk)) = index.get(hash) {
+                    let sp = sync_path.clone();
+                    let src_file = src_file.clone();
+                    let src_chunk = *src_chunk;
+                    let data = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current()
+                            .block_on(storage::read_local_chunk(&sp, &src_file, src_chunk))
+                    });
+                    if let Some(bytes) = data {
+                        ts.received_chunks.insert(chunk_index, bytes);
+                        local_hits += 1;
+                    }
                 }
             }
         }
@@ -1314,13 +1882,17 @@ fn start_queued_files(
 
         let count = needed.len().min(WINDOW);
         for &ci in needed.iter().take(count) {
-            swarm.behaviour_mut().rr.send_request(
-                &peer,
-                SyncMessage::ChunkRequest {
+            let req = match pf.file_id {
+                Some(file_id) => SyncMessage::EncryptedChunkRequest {
+                    file_id,
+                    chunk_index: ci as u32,
+                },
+                None => SyncMessage::ChunkRequest {
                     file_name: pf.file_name.clone(),
                     chunk_index: ci,
                 },
-            );
+            };
+            swarm.behaviour_mut().rr.send_request(&peer, req);
         }
         ts.next_request = needed.get(count).copied().unwrap_or(total);
 
@@ -1337,6 +1909,16 @@ fn rel_path_exists(sync_root: &std::path::PathBuf, rel: &str) -> bool {
     for component in rel.split('/') {
         p.push(component);
     }
+    p.exists()
+}
+
+fn vault_path_exists(sync_root: &std::path::PathBuf, rel: &str) -> bool {
+    let mut p = sync_root.clone();
+    for component in rel.split('/') {
+        p.push(component);
+    }
+    let new_name = format!("{}.vit", p.file_name().unwrap().to_string_lossy());
+    p.set_file_name(new_name);
     p.exists()
 }
 

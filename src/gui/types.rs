@@ -36,6 +36,16 @@ pub enum GuiCommand {
     DenyPeer {
         peer_id: String,
     },
+
+    /// Decrypt a `<name>.vit` file from the sync folder out to a plaintext
+    /// destination on disk. Used by the GUI's "Decrypt File" button.
+    DecryptFile {
+        /// Logical filename (no `.vit` suffix); resolved against the current
+        /// sync folder.
+        name: String,
+        /// Absolute destination path for the decrypted plaintext.
+        dest: String,
+    },
 }
 
 // ─── Backend → Browser ────────────────────────────────────────────────────────
@@ -91,6 +101,16 @@ pub enum GuiEvent {
     },
     /// A log line — mirrors the tracing output into the GUI console
     Log { level: String, message: String },
+
+    /// Snapshot of the node's zero-knowledge posture. Sent once per WS
+    /// connect and again whenever vault settings change. The GUI uses this
+    /// to render the "Vault" status pill in the header.
+    VaultStatus {
+        vault_mode: bool,
+        encrypted_protocol: bool,
+        /// Short fingerprint of the at-rest vault key (or "—" when off).
+        key_fingerprint: String,
+    },
 }
 
 // ─── One file in a FolderListing ─────────────────────────────────────────────

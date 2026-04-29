@@ -15,6 +15,7 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tracing::{error, warn};
 
+use crate::crypto;
 use crate::state::{AppState, short_id};
 use crate::storage;
 use super::types::{GuiCommand, GuiEvent, GuiFileInfo};
@@ -41,6 +42,28 @@ pub async fn handle_client(
         peer_id:   my_peer_id.clone(),
         node_name: my_name.clone(),
     }).await;
+
+    // ── Vault posture snapshot ────────────────────────────────────────────────
+    {
+        let st = state.lock().await;
+        let fp = st
+            .vault_key
+            .as_ref()
+            .map(|k| crypto::short_fingerprint(k))
+            .unwrap_or_else(|| "—".to_string());
+        let vault_mode = st.vault_mode;
+        let encrypted_protocol = st.encrypted_protocol;
+        drop(st);
+        send(
+            &mut ws_tx,
+            &GuiEvent::VaultStatus {
+                vault_mode,
+                encrypted_protocol,
+                key_fingerprint: fp,
+            },
+        )
+        .await;
+    }
 
     {
         let st = state.lock().await;
