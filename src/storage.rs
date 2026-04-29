@@ -506,7 +506,7 @@ pub async fn get_encrypted_manifest(
         node_name: node_name.to_string(),
         files: entries,
     };
-    let cbor = serde_cbor::to_vec(&payload).context("manifest cbor")?;
+    let cbor = serde_json::to_vec(&payload).context("manifest cbor")?;
     let ciphertext = crypto::encrypt_with_aad(transport_key, &cbor, MANIFEST_AAD)
         .context("manifest encrypt")?;
 
@@ -522,7 +522,7 @@ pub fn decrypt_manifest(
     let cbor = crypto::decrypt_with_aad(transport_key, ciphertext, MANIFEST_AAD)
         .context("manifest decrypt failed (wrong transport key?)")?;
     let payload: EncryptedManifestPayload =
-        serde_cbor::from_slice(&cbor).context("manifest cbor parse")?;
+        serde_json::from_slice(&cbor).context("manifest cbor parse")?;
     Ok(payload)
 }
 
