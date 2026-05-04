@@ -167,7 +167,10 @@ async fn push_manifest_to_peer(
                 log(
                     event_tx,
                     "ERROR",
-                    format!("push_manifest: encrypt failed for {}: {e}", short_id(pid_str)),
+                    format!(
+                        "push_manifest: encrypt failed for {}: {e}",
+                        short_id(pid_str)
+                    ),
                 );
                 return false;
             }
@@ -1198,6 +1201,230 @@ async fn on_request(
                 .send_response(channel, SyncMessage::Ack);
         }
 
+        // ── Pushed manifest (EncryptedManifest arriving as a request) ────────
+        //
+        // push_manifest_to_peer() uses send_request, so the pushed manifest
+        // lands here in on_request, not in on_response. We ack the channel
+        // immediately, then run exactly the same processing logic as the
+        // on_response EncryptedManifest arm so the download scheduler fires.
+        SyncMessage::EncryptedManifest { ciphertext } => {
+            // Ack first so the channel isn't left hanging.
+            let _ = swarm
+                .behaviour_mut()
+                .rr
+                .send_response(channel, SyncMessage::Ack);
+
+            let peer_key = state.lock().await.key_for_peer(&peer);
+            let key = match peer_key {
+                Some(k) => k,
+                None => {
+                    log(
+                        event_tx,
+                        "WARN",
+                        format!(
+                            "Pushed EncryptedManifest from {} but no transport key — ignoring",
+                            short_id(pid_str)
+                        ),
+                    );
+                    return;
+                }
+            };
+            let payload = match storage::decrypt_manifest(&key, &ciphertext) {
+                Ok(p) => p,
+                Err(e) => {
+                    log(
+                        event_tx,
+                        "ERROR",
+                        format!(
+                            "Pushed manifest decrypt failed from {}: {e}",
+                            short_id(pid_str)
+                        ),
+                    );
+                    return;
+                }
+            };
+
+            let peer_name = payload.node_name.clone();
+            state
+                .lock()
+                .await
+                .peer_names
+                .insert(pid_str.to_string(), peer_name.clone());
+
+            if payload.files.is_empty() {
+                log(
+                    event_tx,
+                    "INFO",
+                    format!("{peer_name} pushed manifest with no files"),
+                );
+                return;
+            }
+
+            let (sync_path, vault_mode) = {
+                let st = state.lock().await;
+                (st.sync_path.clone(), st.vault_mode)
+            };
+            let sync_path = match sync_path {
+                Some(p) => p,
+                None => {
+                    log(
+                        event_tx,
+                        "WARN",
+                        format!(
+                            "Received pushed manifest from {peer_name} but no sync folder set — will process when folder is set"
+                        ),
+                    );
+                    return;
+                }
+            };
+
+            // Build inbound id map so chunk responses can be resolved.
+            let mut info_map: HashMap<[u8; 16], InboundFileInfo> = HashMap::new();
+            for fe in &payload.files {
+                info_map.insert(
+                    fe.file_id,
+                    InboundFileInfo {
+                        file_name: fe.file_name.clone(),
+                        file_size: fe.file_size,
+                        total_chunks: fe.total_chunks,
+                        blinded_chunk_hashes: fe.blinded_chunk_hashes.clone(),
+                    },
+                );
+            }
+            state.lock().await.inbound_file_ids.insert(peer, info_map);
+
+            let dl = transfers.entry(peer).or_insert_with(PeerDownload::new);
+            let mut newly_queued = 0usize;
+            for fe in &payload.files {
+                if rel_path_exists(&sync_path, &fe.file_name) {
+                    continue;
+                }
+                if vault_mode && vault_path_exists(&sync_path, &fe.file_name) {
+                    continue;
+                }
+                if dl.active.contains_key(&fe.file_name) {
+                    continue;
+                }
+                if dl.queue.iter().any(|p| p.file_name == fe.file_name) {
+                    continue;
+                }
+                dl.queue.push_back(PendingFile {
+                    file_name: fe.file_name.clone(),
+                    total_chunks: fe.total_chunks as usize,
+                    file_size: fe.file_size,
+                    chunk_hashes: fe.blinded_chunk_hashes.clone(),
+                    file_id: Some(fe.file_id),
+                });
+                newly_queued += 1;
+            }
+
+            let total_pending = dl.active.len() + dl.queue.len();
+            if total_pending == 0 {
+                log(
+                    event_tx,
+                    "OK",
+                    format!("All files from {peer_name} already synced"),
+                );
+                return;
+            }
+
+            log(
+                event_tx,
+                "INFO",
+                format!(
+                    "{peer_name} pushed manifest: {newly_queued} file(s) queued ({} active, {} waiting)",
+                    dl.active.len(),
+                    dl.queue.len()
+                ),
+            );
+
+            start_queued_files(peer, &sync_path, dl, swarm, event_tx, pid_str);
+        }
+
+        // ── Pushed plaintext Manifest arriving as a request ───────────────────
+        SyncMessage::Manifest {
+            node_name: peer_name,
+            ref files,
+        } => {
+            let _ = swarm
+                .behaviour_mut()
+                .rr
+                .send_response(channel, SyncMessage::Ack);
+
+            state
+                .lock()
+                .await
+                .peer_names
+                .insert(pid_str.to_string(), peer_name.clone());
+
+            if files.is_empty() {
+                log(
+                    event_tx,
+                    "INFO",
+                    format!("{peer_name} pushed manifest with no files"),
+                );
+                return;
+            }
+
+            let sync_path = match state.lock().await.sync_path.clone() {
+                Some(p) => p,
+                None => {
+                    log(
+                        event_tx,
+                        "WARN",
+                        "Received pushed manifest but no sync folder set!".into(),
+                    );
+                    return;
+                }
+            };
+
+            let dl = transfers.entry(peer).or_insert_with(PeerDownload::new);
+            let mut newly_queued = 0usize;
+            for fe in files {
+                if rel_path_exists(&sync_path, &fe.file_name) {
+                    continue;
+                }
+                if dl.active.contains_key(&fe.file_name) {
+                    continue;
+                }
+                if dl.queue.iter().any(|p| p.file_name == fe.file_name) {
+                    continue;
+                }
+                dl.queue.push_back(PendingFile::from(fe));
+                newly_queued += 1;
+            }
+
+            if dl.active.len() + dl.queue.len() == 0 {
+                log(
+                    event_tx,
+                    "OK",
+                    format!("All files from {peer_name} already synced"),
+                );
+                return;
+            }
+
+            log(
+                event_tx,
+                "INFO",
+                format!("{peer_name} pushed manifest: {newly_queued} file(s) queued",),
+            );
+
+            start_queued_files(peer, &sync_path, dl, swarm, event_tx, pid_str);
+        }
+
+        // ── Pushed Empty — peer has no files, nothing to do ───────────────────
+        SyncMessage::Empty => {
+            let _ = swarm
+                .behaviour_mut()
+                .rr
+                .send_response(channel, SyncMessage::Ack);
+            log(
+                event_tx,
+                "INFO",
+                format!("{} has no files to offer", short_id(pid_str)),
+            );
+        }
+
         _ => {
             let _ = swarm.behaviour_mut().rr.send_response(
                 channel,
@@ -1503,29 +1730,27 @@ async fn on_response(
 
             let enc_key = state.lock().await.key_for_peer(&peer);
             let plaintext = match enc_key {
-                Some(ref key) => {
-                    match crypto::decrypt(key, data) {
-                        Ok(pt) => pt,
-                        Err(e) => {
-                            log(
-                                event_tx,
-                                "ERROR",
-                                format!(
-                                    "{file_name} chunk {chunk_index} decryption failed: {e}. \
+                Some(ref key) => match crypto::decrypt(key, data) {
+                    Ok(pt) => pt,
+                    Err(e) => {
+                        log(
+                            event_tx,
+                            "ERROR",
+                            format!(
+                                "{file_name} chunk {chunk_index} decryption failed: {e}. \
                                      Check that all peers use the same key file."
-                                ),
-                            );
-                            swarm.behaviour_mut().rr.send_request(
-                                &peer,
-                                SyncMessage::ChunkRequest {
-                                    file_name: file_name.clone(),
-                                    chunk_index,
-                                },
-                            );
-                            return;
-                        }
+                            ),
+                        );
+                        swarm.behaviour_mut().rr.send_request(
+                            &peer,
+                            SyncMessage::ChunkRequest {
+                                file_name: file_name.clone(),
+                                chunk_index,
+                            },
+                        );
+                        return;
                     }
-                }
+                },
                 None => data.clone(),
             };
 
