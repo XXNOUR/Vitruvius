@@ -727,7 +727,12 @@ pub async fn on_swarm_event(
             match message {
                 request_response::Message::Request {
                     channel, request, ..
-                } => on_request(request, channel, peer, &pid_str, swarm, &state, event_tx).await,
+                } => {
+                    on_request(
+                        request, channel, peer, &pid_str, swarm, &state, event_tx, transfers,
+                    )
+                    .await
+                }
                 request_response::Message::Response { response, .. } => {
                     on_response(response, peer, &pid_str, swarm, &state, event_tx, transfers).await
                 }
@@ -759,6 +764,7 @@ async fn on_request(
     swarm: &mut Swarm<MyBehaviour>,
     state: &Arc<Mutex<AppState>>,
     event_tx: &mpsc::UnboundedSender<GuiEvent>,
+    transfers: &mut HashMap<PeerId, PeerDownload>,
 ) {
     match request {
         SyncMessage::FolderAnnouncement {
