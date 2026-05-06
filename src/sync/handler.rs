@@ -250,7 +250,25 @@ pub async fn on_command(
                                         fingerprint
                                     ),
                                 );
+                                let has_folder = state.lock().await.sync_path.is_some();
+                                if has_folder {
+                                    push_manifest_to_peer(pid, &peer_id, swarm, &state, event_tx)
+                                        .await;
+                                    swarm
+                                        .behaviour_mut()
+                                        .rr
+                                        .send_request(&pid, SyncMessage::ManifestRequest);
+                                    log(
+                                        event_tx,
+                                        "INFO",
+                                        format!(
+                                    "TOFU approved — pushed manifest to {} and requested theirs",
+                                    short_id(&peer_id)
+                                ),
+                                    );
+                                }
                             }
+
                             Err(e) => {
                                 log(event_tx, "ERROR", format!("Key derivation failed: {e}"));
                             }
