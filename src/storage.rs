@@ -36,9 +36,7 @@ use std::time::Instant;
 use tracing::{error, info};
 
 use crate::crypto;
-use crate::network::{
-    EncryptedFileEntry, EncryptedManifestPayload, FileEntry, SyncMessage,
-};
+use crate::network::{EncryptedFileEntry, EncryptedManifestPayload, FileEntry, SyncMessage};
 
 pub const CHUNK_SIZE: u64 = 512 * 1024; // 512 KB
 pub const VAULT_EXT: &str = "vit";
@@ -86,7 +84,9 @@ impl FileTransferState {
 
     pub fn missing_chunks(&self) -> Vec<usize> {
         let total = self.metadata.as_ref().map(|m| m.total_chunks).unwrap_or(0);
-        (0..total).filter(|i| !self.received_chunks.contains_key(i)).collect()
+        (0..total)
+            .filter(|i| !self.received_chunks.contains_key(i))
+            .collect()
     }
 }
 
@@ -122,7 +122,11 @@ fn relative_path(root: &Path, path: &Path) -> Option<String> {
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join("/");
-        if s.is_empty() { None } else { Some(s) }
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     })
 }
 
@@ -165,7 +169,12 @@ fn compute_file_metadata_plain(root: &Path, abs_path: &Path) -> Result<FileMetad
         // FIX: hash only the bytes we actually read, not the whole buffer.
         chunk_hashes.push(blake3::hash(&buf[..n]).into());
     }
-    Ok(FileMetadata { file_name, total_chunks, file_size, chunk_hashes })
+    Ok(FileMetadata {
+        file_name,
+        total_chunks,
+        file_size,
+        chunk_hashes,
+    })
 }
 
 fn walk_dir_plain(root: &Path, dir: &Path, results: &mut Vec<FileMetadata>) {
@@ -246,8 +255,8 @@ pub fn vault_read_chunk(
     chunk_index: u32,
     vault_key: &[u8; 32],
 ) -> Result<Vec<u8>> {
-    let mut f = File::open(vault_file_path)
-        .with_context(|| format!("vault open {:?}", vault_file_path))?;
+    let mut f =
+        File::open(vault_file_path).with_context(|| format!("vault open {:?}", vault_file_path))?;
     let (file_uuid, total_chunks, _orig_size) = read_vault_header(&mut f)?;
     if chunk_index >= total_chunks {
         return Err(anyhow!("chunk {} >= total {}", chunk_index, total_chunks));
@@ -303,8 +312,7 @@ pub fn vault_write_file_from_plaintext_chunks(
         .map_err(|_| anyhow!("too many chunks"))?;
     let original_size: u64 = plaintext_chunks.iter().map(|c| c.len() as u64).sum();
 
-    let mut f = File::create(&target)
-        .with_context(|| format!("vault create {:?}", target))?;
+    let mut f = File::create(&target).with_context(|| format!("vault create {:?}", target))?;
 
     // Header.
     f.write_all(VAULT_MAGIC)?;
@@ -317,9 +325,12 @@ pub fn vault_write_file_from_plaintext_chunks(
     for (i, chunk) in plaintext_chunks.iter().enumerate() {
         let plaintext_hash: [u8; 32] = blake3::hash(chunk).into();
         let aad = vault_chunk_aad(&file_uuid, i as u32);
-        let block = crypto::encrypt_with_aad(vault_key, chunk, &aad)
-            .context("vault chunk encrypt")?;
-        let block_len: u32 = block.len().try_into().map_err(|_| anyhow!("chunk too big"))?;
+        let block =
+            crypto::encrypt_with_aad(vault_key, chunk, &aad).context("vault chunk encrypt")?;
+        let block_len: u32 = block
+            .len()
+            .try_into()
+            .map_err(|_| anyhow!("chunk too big"))?;
         f.write_all(&plaintext_hash)?;
         f.write_all(&block_len.to_le_bytes())?;
         f.write_all(&block)?;
@@ -345,8 +356,8 @@ pub fn vault_export_to_plaintext(
     vault_key: &[u8; 32],
     dest_path: &Path,
 ) -> Result<u64> {
-    let mut f = File::open(vault_file_path)
-        .with_context(|| format!("vault open {:?}", vault_file_path))?;
+    let mut f =
+        File::open(vault_file_path).with_context(|| format!("vault open {:?}", vault_file_path))?;
     let (file_uuid, total_chunks, original_size) = read_vault_header(&mut f)?;
     if let Some(p) = dest_path.parent() {
         fs::create_dir_all(p).ok();
@@ -362,8 +373,8 @@ pub fn vault_export_to_plaintext(
         let mut block = vec![0u8; block_len];
         f.read_exact(&mut block)?;
         let aad = vault_chunk_aad(&file_uuid, i);
-        let plaintext = crypto::decrypt_with_aad(vault_key, &block, &aad)
-            .context("vault export decrypt")?;
+        let plaintext =
+            crypto::decrypt_with_aad(vault_key, &block, &aad).context("vault export decrypt")?;
         out.write_all(&plaintext)?;
     }
     out.sync_all()?;
@@ -407,9 +418,7 @@ fn walk_dir_vault(root: &Path, dir: &Path, results: &mut Vec<FileMetadata>) {
         let path = entry.path();
         if path.is_dir() {
             walk_dir_vault(root, &path, results);
-        } else if path.is_file()
-            && path.extension().and_then(|s| s.to_str()) == Some(VAULT_EXT)
-        {
+        } else if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some(VAULT_EXT) {
             match compute_file_metadata_vault(root, &path) {
                 Ok(m) => results.push(m),
                 Err(e) => error!("Skipping bad vault file {:?}: {}", path, e),
@@ -478,7 +487,13 @@ pub async fn get_encrypted_manifest(
     vault_mode: bool,
     vault_key: Option<&[u8; 32]>,
 ) -> Result<(SyncMessage, HashMap<[u8; 16], String>)> {
-    let files = list_folder_modal(sync_root, vault_mode, vault_key).await?;
+    let mut files = list_folder_modal(sync_root, vault_mode, vault_key).await?;
+    // Vault mode only lists *.vit files. If the folder has plain files that
+    // haven't been imported yet, fall back to plain listing so they are still
+    // offered to the peer. The chunk reader has a matching fallback below.
+    if files.is_empty() && vault_mode {
+        files = list_folder_modal(sync_root, false, None).await?;
+    }
     if files.is_empty() {
         return Ok((SyncMessage::Empty, HashMap::new()));
     }
@@ -507,8 +522,8 @@ pub async fn get_encrypted_manifest(
         files: entries,
     };
     let cbor = serde_cbor::to_vec(&payload).context("manifest cbor")?;
-    let ciphertext = crypto::encrypt_with_aad(transport_key, &cbor, MANIFEST_AAD)
-        .context("manifest encrypt")?;
+    let ciphertext =
+        crypto::encrypt_with_aad(transport_key, &cbor, MANIFEST_AAD).context("manifest encrypt")?;
 
     Ok((SyncMessage::EncryptedManifest { ciphertext }, id_map))
 }
@@ -544,9 +559,14 @@ fn read_local_chunk_plain(
     }
 
     if vault_mode {
-        let vault_key = vault_key.ok_or_else(|| anyhow!("vault mode without vault_key"))?;
-        let abs = rel_to_vault_abs(sync_root, rel_path);
-        return vault_read_chunk(&abs, chunk_index as u32, vault_key);
+        // Prefer the vault container if it exists; fall back to the plain file
+        // so that files not yet imported into vault format are still serveable.
+        let vault_abs = rel_to_vault_abs(sync_root, rel_path);
+        if vault_abs.exists() {
+            let vault_key = vault_key.ok_or_else(|| anyhow!("vault mode without vault_key"))?;
+            return vault_read_chunk(&vault_abs, chunk_index as u32, vault_key);
+        }
+        // .vit not found — fall through to plain read below.
     }
 
     let abs = rel_to_abs(sync_root, rel_path);
@@ -570,7 +590,15 @@ pub async fn get_chunk(
     chunk_index: usize,
     encryption_key: Option<&[u8; 32]>,
 ) -> Result<SyncMessage> {
-    get_chunk_modal(sync_root, rel_path, chunk_index, encryption_key, false, None).await
+    get_chunk_modal(
+        sync_root,
+        rel_path,
+        chunk_index,
+        encryption_key,
+        false,
+        None,
+    )
+    .await
 }
 
 /// Vault-mode-aware variant of `get_chunk`.
@@ -582,16 +610,20 @@ pub async fn get_chunk_modal(
     vault_mode: bool,
     vault_key: Option<&[u8; 32]>,
 ) -> Result<SyncMessage> {
-    let plaintext = match read_local_chunk_plain(sync_root, rel_path, chunk_index, vault_mode, vault_key) {
-        Ok(p) => p,
-        Err(e) => {
-            return Ok(SyncMessage::Error { message: e.to_string() });
-        }
-    };
+    let plaintext =
+        match read_local_chunk_plain(sync_root, rel_path, chunk_index, vault_mode, vault_key) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(SyncMessage::Error {
+                    message: e.to_string(),
+                });
+            }
+        };
     let hash: [u8; 32] = blake3::hash(&plaintext).into();
     let data = match transport_key {
-        Some(key) => crypto::encrypt(key, &plaintext)
-            .map_err(|e| anyhow!("Chunk encryption failed: {e}"))?,
+        Some(key) => {
+            crypto::encrypt(key, &plaintext).map_err(|e| anyhow!("Chunk encryption failed: {e}"))?
+        }
         None => plaintext,
     };
     Ok(SyncMessage::ChunkResponse {
@@ -668,13 +700,21 @@ pub async fn reassemble_modal(
         let vault_key = vault_key.ok_or_else(|| anyhow!("vault mode without vault_key"))?;
         let mut chunks = Vec::with_capacity(meta.total_chunks);
         for i in 0..meta.total_chunks {
-            let c = ts
-                .received_chunks
-                .get(&i)
-                .ok_or_else(|| anyhow!("Missing chunk {} during vault reassembly of {}", i, meta.file_name))?;
+            let c = ts.received_chunks.get(&i).ok_or_else(|| {
+                anyhow!(
+                    "Missing chunk {} during vault reassembly of {}",
+                    i,
+                    meta.file_name
+                )
+            })?;
             chunks.push(c.clone());
         }
-        let path = vault_write_file_from_plaintext_chunks(&ts.sync_dir, &meta.file_name, &chunks, vault_key)?;
+        let path = vault_write_file_from_plaintext_chunks(
+            &ts.sync_dir,
+            &meta.file_name,
+            &chunks,
+            vault_key,
+        )?;
         info!("Written vault: {:?}", path);
         return Ok(path);
     }
@@ -686,11 +726,18 @@ pub async fn reassemble_modal(
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("Cannot create dirs {:?}", parent))?;
     }
-    let mut out = File::create(&out_path).with_context(|| format!("Cannot create {:?}", out_path))?;
+    let mut out =
+        File::create(&out_path).with_context(|| format!("Cannot create {:?}", out_path))?;
     for i in 0..meta.total_chunks {
         match ts.received_chunks.get(&i) {
             Some(d) => out.write_all(d)?,
-            None => return Err(anyhow!("Missing chunk {} during reassembly of {}", i, meta.file_name)),
+            None => {
+                return Err(anyhow!(
+                    "Missing chunk {} during reassembly of {}",
+                    i,
+                    meta.file_name
+                ))
+            }
         }
     }
     out.sync_all()?;
@@ -722,7 +769,9 @@ pub async fn build_chunk_index_modal(
     };
     for file in files {
         for (chunk_index, hash) in file.chunk_hashes.iter().enumerate() {
-            index.entry(*hash).or_insert_with(|| (file.file_name.clone(), chunk_index));
+            index
+                .entry(*hash)
+                .or_insert_with(|| (file.file_name.clone(), chunk_index));
         }
     }
     index
@@ -854,7 +903,8 @@ mod tests {
         let dir = tmpdir("vault1");
         let key = [0x42u8; 32];
         let chunks = vec![b"hello vault world".to_vec()];
-        let path = vault_write_file_from_plaintext_chunks(&dir, "hello.txt", &chunks, &key).unwrap();
+        let path =
+            vault_write_file_from_plaintext_chunks(&dir, "hello.txt", &chunks, &key).unwrap();
         let pt = vault_read_chunk(&path, 0, &key).unwrap();
         assert_eq!(pt, b"hello vault world");
     }
@@ -863,8 +913,7 @@ mod tests {
     fn vault_round_trip_multi_chunk() {
         let dir = tmpdir("vaultN");
         let key = [0x33u8; 32];
-        let chunks: Vec<Vec<u8>> =
-            (0..5).map(|i| vec![i as u8; 1234]).collect();
+        let chunks: Vec<Vec<u8>> = (0..5).map(|i| vec![i as u8; 1234]).collect();
         let path = vault_write_file_from_plaintext_chunks(&dir, "data.bin", &chunks, &key).unwrap();
         for i in 0..5u32 {
             let pt = vault_read_chunk(&path, i, &key).unwrap();
@@ -886,8 +935,7 @@ mod tests {
     async fn vault_listing_recovers_original_metadata() {
         let dir = tmpdir("vaultlist");
         let key = [0x55u8; 32];
-        let chunks: Vec<Vec<u8>> =
-            (0..3).map(|i| vec![i as u8; 17]).collect();
+        let chunks: Vec<Vec<u8>> = (0..3).map(|i| vec![i as u8; 17]).collect();
         vault_write_file_from_plaintext_chunks(&dir, "report.pdf", &chunks, &key).unwrap();
         let listing = list_folder_modal(&dir, true, Some(&key)).await.unwrap();
         assert_eq!(listing.len(), 1);
@@ -920,8 +968,9 @@ mod tests {
         let tk = [0x20u8; 32];
         let chunks = vec![b"abc".to_vec()];
         vault_write_file_from_plaintext_chunks(&dir, "doc.txt", &chunks, &vk).unwrap();
-        let (msg, id_map) =
-            get_encrypted_manifest(&dir, "node", &tk, true, Some(&vk)).await.unwrap();
+        let (msg, id_map) = get_encrypted_manifest(&dir, "node", &tk, true, Some(&vk))
+            .await
+            .unwrap();
         let ct = match msg {
             SyncMessage::EncryptedManifest { ciphertext } => ciphertext,
             _ => panic!("expected EncryptedManifest"),

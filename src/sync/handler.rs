@@ -316,31 +316,38 @@ pub async fn on_command(
             } else {
                 log(event_tx, "WARN", "No key loaded — running in plaintext mode. Use --key-path to enable encryption.".into());
             }
-
-            match storage::list_folder(&abs).await {
-                Ok(files) => {
-                    let listing: Vec<GuiFileInfo> = files
-                        .iter()
-                        .map(|f| GuiFileInfo {
-                            name: f.file_name.clone(),
-                            size: f.file_size,
-                            chunks: f.total_chunks,
-                        })
-                        .collect();
-                    let count = listing.len();
-                    let _ = event_tx.send(GuiEvent::FolderListing { files: listing });
-                    log(
-                        event_tx,
-                        "OK",
-                        format!("Sync folder set: {} ({count} file(s))", abs.display()),
-                    );
+            let (folder_vault_mode, folder_vault_key) = {
+                let st = state.lock().await;
+                (st.vault_mode, st.vault_key)
+            };
+            let listed_files = {
+                let mut f =
+                    storage::list_folder_modal(&abs, folder_vault_mode, folder_vault_key.as_ref())
+                        .await
+                        .unwrap_or_default();
+                // Mirror the fallback in get_encrypted_manifest: if vault mode
+                // found no .vit files, show the plain files instead so the
+                // count actually reflects what will be offered to peers.
+                if f.is_empty() && folder_vault_mode {
+                    f = storage::list_folder(&abs).await.unwrap_or_default();
                 }
-                Err(e) => log(
-                    event_tx,
-                    "WARN",
-                    format!("Folder set but listing failed: {e}"),
-                ),
-            }
+                f
+            };
+            let listing: Vec<GuiFileInfo> = listed_files
+                .iter()
+                .map(|f| GuiFileInfo {
+                    name: f.file_name.clone(),
+                    size: f.file_size,
+                    chunks: f.total_chunks,
+                })
+                .collect();
+            let count = listing.len();
+            let _ = event_tx.send(GuiEvent::FolderListing { files: listing });
+            log(
+                event_tx,
+                "OK",
+                format!("Sync folder set: {} ({count} file(s))", abs.display()),
+            );
 
             let connected: Vec<PeerId> = {
                 let mut st = state.lock().await;
