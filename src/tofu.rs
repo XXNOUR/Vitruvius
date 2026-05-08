@@ -101,6 +101,19 @@ pub fn has_peer_key(peer_id: &str) -> bool {
     get_peer_key(peer_id).is_some()
 }
 
+/// Remove a peer's stored key, forcing full re-approval on next connection.
+/// After this call the peer is untrusted until the local user approves a new TOFU exchange.
+pub fn revoke_peer_key(peer_id: &str) -> Result<()> {
+    let mut store = load_store();
+    store.remove(peer_id);
+    save_store(&store)
+}
+
+/// Return all peer IDs that currently have a stored TOFU key.
+pub fn list_trusted_peers() -> Vec<String> {
+    load_store().into_keys().collect()
+}
+
 // ─── Key generation ───────────────────────────────────────────────────────────
 
 /// Generate a new X25519 keypair for a pending key exchange.

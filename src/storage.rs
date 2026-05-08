@@ -29,11 +29,11 @@
 use anyhow::{anyhow, Context, Result};
 use libp2p::PeerId;
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::crypto;
 use crate::network::{EncryptedFileEntry, EncryptedManifestPayload, FileEntry, SyncMessage};
@@ -54,6 +54,9 @@ pub struct FileMetadata {
     pub file_name: String,
     pub total_chunks: usize,
     pub file_size: u64,
+    /// True when this entry came from a `*.vit` vault container.
+    /// The GUI uses this to show the DECRYPT button instead of a green dot.
+    pub is_vault: bool,
     /// Plaintext-hash of each chunk. In vault mode this is read from the
     /// `*.vit` header without ever decrypting; in legacy mode it is computed
     /// by hashing the plaintext file.
@@ -174,6 +177,7 @@ fn compute_file_metadata_plain(root: &Path, abs_path: &Path) -> Result<FileMetad
         total_chunks,
         file_size,
         chunk_hashes,
+        is_vault: false,
     })
 }
 
@@ -362,23 +366,38 @@ pub fn vault_export_to_plaintext(
     if let Some(p) = dest_path.parent() {
         fs::create_dir_all(p).ok();
     }
-    let mut out = File::create(dest_path)?;
-    f.seek(SeekFrom::Start(VAULT_HEADER_LEN as u64))?;
-    for i in 0..total_chunks {
-        let mut _hash = [0u8; VAULT_PER_CHUNK_HASH_LEN];
-        f.read_exact(&mut _hash)?;
-        let mut len_buf = [0u8; VAULT_PER_CHUNK_LEN_PREFIX];
-        f.read_exact(&mut len_buf)?;
-        let block_len = u32::from_le_bytes(len_buf) as usize;
-        let mut block = vec![0u8; block_len];
-        f.read_exact(&mut block)?;
-        let aad = vault_chunk_aad(&file_uuid, i);
-        let plaintext =
-            crypto::decrypt_with_aad(vault_key, &block, &aad).context("vault export decrypt")?;
-        out.write_all(&plaintext)?;
+    // Write to a .tmp file and rename only on full success.
+    // Prevents a corrupt dest file if AEAD fails mid-stream (e.g. wrong key).
+    let tmp_path = dest_path.with_extension("tmp");
+    let result: Result<()> = (|| {
+        let mut out = File::create(&tmp_path)?;
+        f.seek(SeekFrom::Start(VAULT_HEADER_LEN as u64))?;
+        for i in 0..total_chunks {
+            let mut _hash = [0u8; VAULT_PER_CHUNK_HASH_LEN];
+            f.read_exact(&mut _hash)?;
+            let mut len_buf = [0u8; VAULT_PER_CHUNK_LEN_PREFIX];
+            f.read_exact(&mut len_buf)?;
+            let block_len = u32::from_le_bytes(len_buf) as usize;
+            let mut block = vec![0u8; block_len];
+            f.read_exact(&mut block)?;
+            let aad = vault_chunk_aad(&file_uuid, i);
+            let plaintext = crypto::decrypt_with_aad(vault_key, &block, &aad)
+                .context("vault export decrypt")?;
+            out.write_all(&plaintext)?;
+        }
+        out.sync_all()?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            fs::rename(&tmp_path, dest_path)?;
+            Ok(original_size)
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp_path);
+            Err(e)
+        }
     }
-    out.sync_all()?;
-    Ok(original_size)
 }
 
 fn compute_file_metadata_vault(root: &Path, abs_path: &Path) -> Result<FileMetadata> {
@@ -403,6 +422,7 @@ fn compute_file_metadata_vault(root: &Path, abs_path: &Path) -> Result<FileMetad
         total_chunks: total_chunks as usize,
         file_size: original_size,
         chunk_hashes,
+        is_vault: true,
     })
 }
 
@@ -432,6 +452,17 @@ fn walk_dir_vault(root: &Path, dir: &Path, results: &mut Vec<FileMetadata>) {
 // =============================================================================
 pub async fn list_folder(sync_root: &PathBuf) -> Result<Vec<FileMetadata>> {
     list_folder_modal(sync_root, false, None).await
+}
+
+/// Show ALL files in the sync folder — both plaintext and *.vit vault containers.
+/// Used by the GUI so the user always sees their complete file list regardless of
+/// whether vault mode is currently on or off.
+pub async fn list_folder_all(sync_root: &PathBuf) -> Result<Vec<FileMetadata>> {
+    let mut result = Vec::new();
+    walk_dir_plain(sync_root.as_path(), sync_root.as_path(), &mut result);
+    walk_dir_vault(sync_root.as_path(), sync_root.as_path(), &mut result);
+    result.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+    Ok(result)
 }
 
 /// Vault-mode-aware folder listing. When `vault_mode` is true, the function
@@ -487,13 +518,7 @@ pub async fn get_encrypted_manifest(
     vault_mode: bool,
     vault_key: Option<&[u8; 32]>,
 ) -> Result<(SyncMessage, HashMap<[u8; 16], String>)> {
-    let mut files = list_folder_modal(sync_root, vault_mode, vault_key).await?;
-    // Vault mode only lists *.vit files. If the folder has plain files that
-    // haven't been imported yet, fall back to plain listing so they are still
-    // offered to the peer. The chunk reader has a matching fallback below.
-    if files.is_empty() && vault_mode {
-        files = list_folder_modal(sync_root, false, None).await?;
-    }
+    let files = list_folder_modal(sync_root, vault_mode, vault_key).await?;
     if files.is_empty() {
         return Ok((SyncMessage::Empty, HashMap::new()));
     }
@@ -559,14 +584,9 @@ fn read_local_chunk_plain(
     }
 
     if vault_mode {
-        // Prefer the vault container if it exists; fall back to the plain file
-        // so that files not yet imported into vault format are still serveable.
-        let vault_abs = rel_to_vault_abs(sync_root, rel_path);
-        if vault_abs.exists() {
-            let vault_key = vault_key.ok_or_else(|| anyhow!("vault mode without vault_key"))?;
-            return vault_read_chunk(&vault_abs, chunk_index as u32, vault_key);
-        }
-        // .vit not found — fall through to plain read below.
+        let vault_key = vault_key.ok_or_else(|| anyhow!("vault mode without vault_key"))?;
+        let abs = rel_to_vault_abs(sync_root, rel_path);
+        return vault_read_chunk(&abs, chunk_index as u32, vault_key);
     }
 
     let abs = rel_to_abs(sync_root, rel_path);
@@ -726,6 +746,48 @@ pub async fn reassemble_modal(
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("Cannot create dirs {:?}", parent))?;
     }
+
+    // ── Conflict detection ────────────────────────────────────────────────────
+    // If a file already exists locally AND its content differs from what we are
+    // about to write, keep BOTH copies. The existing local file is renamed to
+    // "name.conflict.TIMESTAMP.ext" so the user loses nothing.
+    if out_path.exists() {
+        let mut existing_bytes = Vec::new();
+        if let Ok(mut f) = File::open(&out_path) {
+            let _ = f.read_to_end(&mut existing_bytes);
+        }
+        // Reassemble the incoming bytes so we can compare.
+        let mut incoming_bytes = Vec::new();
+        for i in 0..meta.total_chunks {
+            if let Some(d) = ts.received_chunks.get(&i) {
+                incoming_bytes.extend_from_slice(d);
+            }
+        }
+        if existing_bytes != incoming_bytes {
+            // Different content — rename the existing file before overwriting.
+            let ts_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let conflict_name = match (out_path.file_stem(), out_path.extension()) {
+                (Some(stem), Some(ext)) => format!(
+                    "{}.conflict.{}.{}",
+                    stem.to_string_lossy(),
+                    ts_secs,
+                    ext.to_string_lossy()
+                ),
+                (Some(stem), None) => format!("{}.conflict.{}", stem.to_string_lossy(), ts_secs),
+                _ => format!("conflict.{}", ts_secs),
+            };
+            let conflict_path = out_path.with_file_name(conflict_name);
+            if let Err(e) = fs::rename(&out_path, &conflict_path) {
+                warn!("Could not rename conflict file: {}", e);
+            } else {
+                info!("Conflict: kept existing as {:?}", conflict_path);
+            }
+        }
+    }
+
     let mut out =
         File::create(&out_path).with_context(|| format!("Cannot create {:?}", out_path))?;
     for i in 0..meta.total_chunks {
@@ -872,6 +934,7 @@ pub async fn process_chunk(
 // =============================================================================
 #[cfg(test)]
 pub fn _open_for_append(p: &Path) -> Result<File> {
+    use std::fs::OpenOptions;
     Ok(OpenOptions::new().append(true).open(p)?)
 }
 
@@ -980,5 +1043,276 @@ mod tests {
         assert_eq!(payload.files.len(), 1);
         assert_eq!(payload.files[0].file_name, "doc.txt");
         assert_eq!(id_map.get(&payload.files[0].file_id).unwrap(), "doc.txt");
+    }
+    // =========================================================================
+    // Tests for new v0.3 features
+    // =========================================================================
+
+    // ── Feature 1: Conflict resolution ───────────────────────────────────────
+    // When an incoming file has different content from an existing local file,
+    // the local file should be renamed to *.conflict.TIMESTAMP.* and the
+    // incoming file written to the original path.
+
+    #[test]
+    fn conflict_detection_renames_existing_file() {
+        let dir = tmpdir("conflict1");
+        let file_path = dir.join("notes.txt");
+
+        // Write the "existing local" version
+        fs::write(&file_path, b"local version of notes").unwrap();
+
+        // Simulate an incoming FileTransferState with different content
+        let incoming_data = b"remote version of notes - different!";
+        let mut ts = FileTransferState::new(dir.clone());
+        ts.metadata = Some(FileMetadata {
+            file_name: "notes.txt".into(),
+            total_chunks: 1,
+            file_size: incoming_data.len() as u64,
+            chunk_hashes: vec![],
+            is_vault: false,
+        });
+        ts.received_chunks.insert(0, incoming_data.to_vec());
+
+        // Run reassemble in plaintext mode (no vault)
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(reassemble_modal(&ts, false, None));
+        assert!(result.is_ok(), "reassemble failed: {:?}", result);
+
+        // The original path should now contain the incoming data
+        let written = fs::read(&file_path).unwrap();
+        assert_eq!(
+            written, incoming_data,
+            "incoming file not written to original path"
+        );
+
+        // A .conflict. file should exist in the same directory
+        let conflict_files: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".conflict."))
+            .collect();
+        assert_eq!(
+            conflict_files.len(),
+            1,
+            "expected exactly one conflict copy, found {:?}",
+            conflict_files
+        );
+
+        // The conflict copy should contain the old local data
+        let conflict_data = fs::read(conflict_files[0].path()).unwrap();
+        assert_eq!(
+            conflict_data, b"local version of notes",
+            "conflict copy has wrong content"
+        );
+    }
+
+    #[test]
+    fn no_conflict_when_content_identical() {
+        let dir = tmpdir("conflict2");
+        let file_path = dir.join("same.txt");
+        let data = b"identical content on both sides";
+
+        // Write existing file with same content as incoming
+        fs::write(&file_path, data).unwrap();
+
+        let mut ts = FileTransferState::new(dir.clone());
+        ts.metadata = Some(FileMetadata {
+            file_name: "same.txt".into(),
+            total_chunks: 1,
+            file_size: data.len() as u64,
+            chunk_hashes: vec![],
+            is_vault: false,
+        });
+        ts.received_chunks.insert(0, data.to_vec());
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(reassemble_modal(&ts, false, None))
+            .unwrap();
+
+        // No conflict files should exist
+        let conflict_files: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".conflict."))
+            .collect();
+        assert!(
+            conflict_files.is_empty(),
+            "should not create conflict for identical content"
+        );
+    }
+
+    #[test]
+    fn no_conflict_when_file_is_new() {
+        let dir = tmpdir("conflict3");
+        // File does NOT exist before reassemble — no conflict should occur
+        let data = b"brand new file";
+
+        let mut ts = FileTransferState::new(dir.clone());
+        ts.metadata = Some(FileMetadata {
+            file_name: "new_file.txt".into(),
+            total_chunks: 1,
+            file_size: data.len() as u64,
+            chunk_hashes: vec![],
+            is_vault: false,
+        });
+        ts.received_chunks.insert(0, data.to_vec());
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(reassemble_modal(&ts, false, None))
+            .unwrap();
+
+        let written = fs::read(dir.join("new_file.txt")).unwrap();
+        assert_eq!(written, data);
+
+        let conflict_files: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".conflict."))
+            .collect();
+        assert!(
+            conflict_files.is_empty(),
+            "new file should never create a conflict"
+        );
+    }
+
+    #[test]
+    fn conflict_preserves_extension_in_rename() {
+        let dir = tmpdir("conflict4");
+        // The conflict copy must keep the original extension: report.conflict.TS.pdf
+        fs::write(dir.join("report.pdf"), b"old pdf content").unwrap();
+
+        let mut ts = FileTransferState::new(dir.clone());
+        ts.metadata = Some(FileMetadata {
+            file_name: "report.pdf".into(),
+            total_chunks: 1,
+            file_size: 7,
+            chunk_hashes: vec![],
+            is_vault: false,
+        });
+        ts.received_chunks.insert(0, b"new pdf".to_vec());
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(reassemble_modal(&ts, false, None))
+            .unwrap();
+
+        let conflict: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".conflict."))
+            .collect();
+        assert_eq!(conflict.len(), 1);
+        let name = conflict[0].file_name().to_string_lossy().to_string();
+        // Must start with "report" and end with ".pdf"
+        assert!(name.starts_with("report"), "conflict name wrong: {name}");
+        assert!(
+            name.ends_with(".pdf"),
+            "conflict must keep .pdf extension, got: {name}"
+        );
+    }
+
+    // ── Feature 2: Auto-decrypt (vault export) ────────────────────────────────
+    // vault_export_to_plaintext must reproduce byte-for-byte the original data
+    // regardless of chunk count and sizes. This is the function used by the
+    // auto-decrypt-on-arrival path in the sync handler.
+
+    #[test]
+    fn auto_decrypt_single_chunk_exact_bytes() {
+        let dir = tmpdir("autodec1");
+        let key = [0xEEu8; 32];
+        let original = b"Hello, zero-knowledge world!";
+        let chunks = vec![original.to_vec()];
+        let vit = vault_write_file_from_plaintext_chunks(&dir, "msg.txt", &chunks, &key).unwrap();
+        let dest = dir.join("msg.txt.plain");
+        vault_export_to_plaintext(&vit, &key, &dest).unwrap();
+        let out = fs::read(&dest).unwrap();
+        assert_eq!(
+            out, original,
+            "single-chunk auto-decrypt produced wrong bytes"
+        );
+    }
+
+    #[test]
+    fn auto_decrypt_multi_chunk_reassembles_correctly() {
+        let dir = tmpdir("autodec2");
+        let key = [0xCCu8; 32];
+        // Simulate a 3-chunk file with distinct content per chunk
+        let chunks: Vec<Vec<u8>> = vec![
+            (0..100).map(|i| i as u8).collect(),
+            (100..200).map(|i| i as u8).collect(),
+            (200..255).map(|i| i as u8).collect(),
+        ];
+        let expected: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+        let vit = vault_write_file_from_plaintext_chunks(&dir, "data.bin", &chunks, &key).unwrap();
+        let dest = dir.join("data.bin.plain");
+        vault_export_to_plaintext(&vit, &key, &dest).unwrap();
+        let out = fs::read(&dest).unwrap();
+        assert_eq!(out, expected, "multi-chunk auto-decrypt byte mismatch");
+    }
+
+    #[test]
+    fn auto_decrypt_wrong_key_is_rejected() {
+        let dir = tmpdir("autodec3");
+        let key = [0xAAu8; 32];
+        let wrong_key = [0xBBu8; 32];
+        let chunks = vec![b"sensitive data".to_vec()];
+        let vit =
+            vault_write_file_from_plaintext_chunks(&dir, "secret.txt", &chunks, &key).unwrap();
+        let dest = dir.join("out.txt");
+        // Must fail — wrong key cannot produce valid AEAD plaintext
+        assert!(
+            vault_export_to_plaintext(&vit, &wrong_key, &dest).is_err(),
+            "wrong key should have been rejected by AEAD"
+        );
+        // Destination file must not have been created
+        assert!(
+            !dest.exists(),
+            "dest file must not exist after failed decrypt"
+        );
+    }
+
+    #[test]
+    fn auto_decrypt_vit_then_delete_leaves_only_plaintext() {
+        // Simulate the full auto-decrypt-on-arrival flow:
+        // 1. vit blob written by reassemble_modal
+        // 2. vault_export_to_plaintext decrypts it
+        // 3. caller deletes the vit blob
+        // Result: only plaintext survives, user sees nothing unusual
+        let dir = tmpdir("autodec4");
+        let key = [0x55u8; 32];
+        let chunks = vec![b"important document".to_vec()];
+        let vit = vault_write_file_from_plaintext_chunks(&dir, "doc.txt", &chunks, &key).unwrap();
+        assert!(vit.exists());
+
+        let plain = vit.with_file_name("doc.txt");
+        vault_export_to_plaintext(&vit, &key, &plain).unwrap();
+        fs::remove_file(&vit).unwrap(); // this is what the handler does
+
+        assert!(!vit.exists(), ".vit blob should be gone");
+        assert!(plain.exists(), "plaintext file should exist");
+        let content = fs::read(&plain).unwrap();
+        assert_eq!(content, b"important document");
+    }
+
+    // ── Existing tests still pass (regression guards) ─────────────────────────
+
+    #[test]
+    fn vault_export_regression() {
+        // Re-run the original vault_export_round_trip to confirm our changes
+        // to reassemble_modal did not break the vault layer.
+        let dir = tmpdir("vreg");
+        let key = [0x77u8; 32];
+        let chunks = vec![vec![1u8; 100], vec![2u8; 200]];
+        let path = vault_write_file_from_plaintext_chunks(&dir, "f.bin", &chunks, &key).unwrap();
+        let dest = dir.join("decrypted.bin");
+        vault_export_to_plaintext(&path, &key, &dest).unwrap();
+        let mut out = Vec::new();
+        File::open(&dest).unwrap().read_to_end(&mut out).unwrap();
+        assert_eq!(out.len(), 300);
+        assert_eq!(&out[..100], &[1u8; 100][..]);
+        assert_eq!(&out[100..], &[2u8; 200][..]);
     }
 }

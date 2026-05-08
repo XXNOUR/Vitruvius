@@ -46,6 +46,15 @@ pub enum GuiCommand {
         /// Absolute destination path for the decrypted plaintext.
         dest: String,
     },
+    /// Revoke the stored TOFU key for a peer — they must re-approve on next connect.
+    RevokeKey {
+        peer_id: String,
+    },
+    /// Toggle vault mode (at-rest .vit encryption) at runtime.
+    /// If enabled and no vault key exists, one is auto-generated.
+    SetVaultMode {
+        enabled: bool,
+    },
 }
 
 // ─── Backend → Browser ────────────────────────────────────────────────────────
@@ -103,13 +112,37 @@ pub enum GuiEvent {
     Log { level: String, message: String },
 
     /// Snapshot of the node's zero-knowledge posture. Sent once per WS
-    /// connect and again whenever vault settings change. The GUI uses this
-    /// to render the "Vault" status pill in the header.
+    /// connect and again whenever a peer key is established. The GUI uses
+    /// this to render the security status pill in the header.
+    ///
+    /// Zero-knowledge is about the WIRE, not the disk:
+    ///   wire_encrypted    = true when this node has a transport key for at
+    ///                        least one peer (TOFU or --key-path). Every chunk
+    ///                        and manifest sent to that peer is AEAD-encrypted.
+    ///   encrypted_protocol= true when the encrypted manifest/chunk variants
+    ///                        are enabled (filenames/hashes never cross the wire
+    ///                        in the clear).
+    ///   key_fingerprint   = short BLAKE3 fingerprint of the active transport key.
     VaultStatus {
-        vault_mode: bool,
+        /// True when at least one peer transport key is established.
+        wire_encrypted: bool,
+        /// True when encrypted manifest + AAD chunk variants are enabled.
         encrypted_protocol: bool,
-        /// Short fingerprint of the at-rest vault key (or "—" when off).
+        /// Short hex fingerprint of the current transport key ("—" = no key yet).
         key_fingerprint: String,
+    },
+    /// A peer's TOFU key was successfully revoked.
+    PeerKeyRevoked { peer_id: String },
+    /// Vault mode (at-rest .vit encryption) was toggled at runtime.
+    VaultModeChanged { vault_mode: bool },
+    /// The list of all peer IDs with stored TOFU keys.
+    /// Sent once on WS connect and again after any revocation.
+    TrustedPeers { peer_ids: Vec<String> },
+    /// A vault file was successfully decrypted.
+    DecryptComplete {
+        name: String,
+        dest: String,
+        size: u64,
     },
 }
 
@@ -120,4 +153,7 @@ pub struct GuiFileInfo {
     pub name: String,
     pub size: u64,
     pub chunks: usize,
+    /// True when the file is stored as a `*.vit` vault blob on disk.
+    /// The GUI uses this flag to render the DECRYPT button.
+    pub is_vault: bool,
 }

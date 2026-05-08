@@ -1,11 +1,8 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-fn get_html(theme: &str) -> &'static str {
-    match theme {
-        "gothic" => include_str!("../../gui/gothic.html"),
-        _ => include_str!("../../gui/vitruvius_gui_2.0.html"),
-    }
+fn get_html(_theme: &str) -> &'static str {
+    include_str!("../../gui/vitruvius_gui_2.0.html")
 }
 
 pub async fn serve(mut stream: TcpStream, ws_port: u16, theme: String) {

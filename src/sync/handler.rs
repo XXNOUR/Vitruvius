@@ -37,29 +37,6 @@
 //
 // The encryption key is read from AppState on every chunk operation.
 // No key (None) → plaintext mode, fully backward-compatible.
-//
-// ── Manifest push model (race-condition fix) ──────────────────────────────────
-//
-// OLD (broken) model — PULL:
-//   Peer A sets folder → sends FolderAnnouncement to B
-//   Peer B receives announcement → sends ManifestRequest to A
-//   Peer A receives request → sends manifest back
-//   BUT: if Peer B hasn't set their folder yet, and Peer A also sends a
-//   ManifestRequest to B, B responds with Empty because sync_path is None.
-//   This creates a 5-10 second race window where both sides keep getting
-//   "Remote peer has no sync folder set" and never actually sync.
-//
-// NEW (fixed) model — PUSH:
-//   When either peer sets their folder OR receives a FolderAnnouncement,
-//   they immediately PUSH their own manifest to the other side as an
-//   unsolicited EncryptedManifest/Manifest request. The receiver processes
-//   it when ready. No ManifestRequest needed in the steady state.
-//   ManifestRequest is kept for explicit "Request Sync" button and for
-//   backwards compatibility with peers that don't push.
-//
-//   Push helper: push_manifest_to_peer() — builds and sends the manifest
-//   as a send_request (not a response), so it lands in the peer's response
-//   handler and triggers the download scheduler.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -103,109 +80,6 @@ impl PeerDownload {
 }
 
 // =============================================================================
-// PUSH MANIFEST HELPER
-// =============================================================================
-//
-// Builds our manifest and sends it as an unsolicited request to the peer.
-// This is the core of the push model — we don't wait for them to ask.
-// Returns true if a manifest was actually sent (we have a folder + key).
-
-async fn push_manifest_to_peer(
-    peer: PeerId,
-    pid_str: &str,
-    swarm: &mut Swarm<MyBehaviour>,
-    state: &Arc<Mutex<AppState>>,
-    event_tx: &mpsc::UnboundedSender<GuiEvent>,
-) -> bool {
-    let (path, my_name, peer_key, vault_mode, vault_key, encrypted_protocol) = {
-        let st = state.lock().await;
-        (
-            st.sync_path.clone(),
-            st.node_name.clone(),
-            st.key_for_peer(&peer),
-            st.vault_mode,
-            st.vault_key,
-            st.encrypted_protocol,
-        )
-    };
-
-    let sync_path = match path {
-        Some(p) => p,
-        None => return false, // no folder set yet, nothing to push
-    };
-
-    if encrypted_protocol && peer_key.is_some() {
-        let key = peer_key.unwrap();
-        match storage::get_encrypted_manifest(
-            &sync_path,
-            &my_name,
-            &key,
-            vault_mode,
-            vault_key.as_ref(),
-        )
-        .await
-        {
-            Ok((SyncMessage::Empty, _)) => {
-                // Folder is set but empty — send Empty so the peer knows.
-                swarm
-                    .behaviour_mut()
-                    .rr
-                    .send_request(&peer, SyncMessage::Empty);
-                return true;
-            }
-            Ok((manifest, id_map)) => {
-                state.lock().await.outbound_file_ids.insert(peer, id_map);
-                swarm.behaviour_mut().rr.send_request(&peer, manifest);
-                log(
-                    event_tx,
-                    "INFO",
-                    format!("→ pushed encrypted manifest to {}", short_id(pid_str)),
-                );
-                return true;
-            }
-            Err(e) => {
-                log(
-                    event_tx,
-                    "ERROR",
-                    format!(
-                        "push_manifest: encrypt failed for {}: {e}",
-                        short_id(pid_str)
-                    ),
-                );
-                return false;
-            }
-        }
-    }
-
-    // Plaintext fallback
-    match storage::get_manifest(&sync_path, &my_name).await {
-        Ok(msg) => {
-            swarm.behaviour_mut().rr.send_request(&peer, msg);
-            log(
-                event_tx,
-                "INFO",
-                format!(
-                    "→ pushed plaintext manifest to {} (no transport key)",
-                    short_id(pid_str)
-                ),
-            );
-            true
-        }
-        Err(e) => {
-            log(
-                event_tx,
-                "ERROR",
-                format!(
-                    "push_manifest: plaintext build failed for {}: {e}",
-                    short_id(pid_str)
-                ),
-            );
-            false
-        }
-    }
-}
-
-// =============================================================================
 // GUI COMMAND HANDLER
 // =============================================================================
 
@@ -235,6 +109,7 @@ pub async fn on_command(
                             Ok(derived_key) => {
                                 let fingerprint = tofu::key_fingerprint(&derived_key);
                                 state.lock().await.set_peer_key(pid, derived_key);
+                                // Send our public key so initiator can derive the same key.
                                 swarm.behaviour_mut().rr.send_request(
                                     &pid,
                                     SyncMessage::KeyExchangeAccept {
@@ -250,31 +125,30 @@ pub async fn on_command(
                                         fingerprint
                                     ),
                                 );
-                                let has_folder = state.lock().await.sync_path.is_some();
-                                if has_folder {
-                                    push_manifest_to_peer(pid, &peer_id, swarm, &state, event_tx)
-                                        .await;
-                                    swarm
-                                        .behaviour_mut()
-                                        .rr
-                                        .send_request(&pid, SyncMessage::ManifestRequest);
-                                    log(
-                                        event_tx,
-                                        "INFO",
-                                        format!(
-                                    "TOFU approved — pushed manifest to {} and requested theirs",
-                                    short_id(&peer_id)
-                                ),
-                                    );
-                                }
                             }
-
                             Err(e) => {
                                 log(event_tx, "ERROR", format!("Key derivation failed: {e}"));
                             }
                         }
                     }
                 }
+            }
+            // Broadcast updated VaultStatus so the GUI security pill refreshes immediately.
+            {
+                let st = state.lock().await;
+                let wire_encrypted = st.encryption_key.is_some() || !st.peer_keys.is_empty();
+                let fp = st
+                    .encryption_key
+                    .or_else(|| st.peer_keys.values().next().copied())
+                    .map(|k| crate::crypto::short_fingerprint(&k))
+                    .unwrap_or_else(|| "—".to_string());
+                let encrypted_protocol = st.encrypted_protocol;
+                drop(st);
+                let _ = event_tx.send(GuiEvent::VaultStatus {
+                    wire_encrypted,
+                    encrypted_protocol,
+                    key_fingerprint: fp,
+                });
             }
         }
 
@@ -292,7 +166,6 @@ pub async fn on_command(
                 let _ = swarm.disconnect_peer_id(pid);
             }
         }
-
         GuiCommand::SetFolder { path } => {
             let p = PathBuf::from(&path);
             if !p.exists() {
@@ -306,6 +179,7 @@ pub async fn on_command(
             };
             let _ = watch_tx.send(abs.clone());
 
+            // Log encryption status when folder is set so the user knows the mode.
             let encrypted = state.lock().await.is_encrypted();
             if encrypted {
                 log(
@@ -316,42 +190,36 @@ pub async fn on_command(
             } else {
                 log(event_tx, "WARN", "No key loaded — running in plaintext mode. Use --key-path to enable encryption.".into());
             }
-            let (folder_vault_mode, folder_vault_key) = {
-                let st = state.lock().await;
-                (st.vault_mode, st.vault_key)
-            };
-            let listed_files = {
-                let mut f =
-                    storage::list_folder_modal(&abs, folder_vault_mode, folder_vault_key.as_ref())
-                        .await
-                        .unwrap_or_default();
-                // Mirror the fallback in get_encrypted_manifest: if vault mode
-                // found no .vit files, show the plain files instead so the
-                // count actually reflects what will be offered to peers.
-                if f.is_empty() && folder_vault_mode {
-                    f = storage::list_folder(&abs).await.unwrap_or_default();
+
+            match storage::list_folder_all(&abs).await {
+                Ok(files) => {
+                    let listing: Vec<GuiFileInfo> = files
+                        .iter()
+                        .map(|f| GuiFileInfo {
+                            name: f.file_name.clone(),
+                            size: f.file_size,
+                            chunks: f.total_chunks,
+                            is_vault: f.is_vault,
+                        })
+                        .collect();
+                    let count = listing.len();
+                    let _ = event_tx.send(GuiEvent::FolderListing { files: listing });
+                    log(
+                        event_tx,
+                        "OK",
+                        format!("Sync folder set: {} ({count} file(s))", abs.display()),
+                    );
                 }
-                f
-            };
-            let listing: Vec<GuiFileInfo> = listed_files
-                .iter()
-                .map(|f| GuiFileInfo {
-                    name: f.file_name.clone(),
-                    size: f.file_size,
-                    chunks: f.total_chunks,
-                })
-                .collect();
-            let count = listing.len();
-            let _ = event_tx.send(GuiEvent::FolderListing { files: listing });
-            log(
-                event_tx,
-                "OK",
-                format!("Sync folder set: {} ({count} file(s))", abs.display()),
-            );
+                Err(e) => log(
+                    event_tx,
+                    "WARN",
+                    format!("Folder set but listing failed: {e}"),
+                ),
+            }
 
             let connected: Vec<PeerId> = {
                 let mut st = state.lock().await;
-                st.sync_path = Some(abs.clone());
+                st.sync_path = Some(abs);
                 st.announced_to.clear();
                 st.connected_peers.iter().cloned().collect()
             };
@@ -359,33 +227,22 @@ pub async fn on_command(
             for peer in connected {
                 let pid_str = peer.to_string();
                 state.lock().await.announced_to.insert(peer);
-
-                // Send FolderAnnouncement so the peer knows we have a folder.
                 swarm.behaviour_mut().rr.send_request(
                     &peer,
                     SyncMessage::FolderAnnouncement {
                         node_name: node_name.to_string(),
                     },
                 );
-
-                // ── PUSH MODEL: immediately push our manifest to this peer ────
-                // Don't wait for them to send ManifestRequest — they may not
-                // have their folder set yet and would respond Empty, creating
-                // the race condition we're fixing. Pushing means they queue
-                // our files as soon as they're ready to receive.
-                push_manifest_to_peer(peer, &pid_str, swarm, &state, event_tx).await;
-
-                // Still request their manifest in case they have files for us.
+                // Request their manifest too — they may already have a folder.
                 swarm
                     .behaviour_mut()
                     .rr
                     .send_request(&peer, SyncMessage::ManifestRequest);
-
                 log(
                     event_tx,
                     "INFO",
                     format!(
-                        "Announced + pushed manifest to {} and requested theirs",
+                        "Announced folder to {} and requested their manifest",
                         short_id(&pid_str)
                     ),
                 );
@@ -428,8 +285,6 @@ pub async fn on_command(
                     "INFO",
                     format!("Requesting manifest from {} …", short_id(&peer_id)),
                 );
-                // For explicit user-triggered sync: push ours AND request theirs.
-                push_manifest_to_peer(pid, &peer_id, swarm, &state, event_tx).await;
                 swarm
                     .behaviour_mut()
                     .rr
@@ -443,7 +298,95 @@ pub async fn on_command(
             }
         }
 
+        GuiCommand::RevokeKey { peer_id } => {
+            if let Ok(pid) = peer_id.parse::<libp2p::PeerId>() {
+                match tofu::revoke_peer_key(&peer_id) {
+                    Err(e) => log(
+                        event_tx,
+                        "ERROR",
+                        format!("Failed to revoke key for {}: {e}", short_id(&peer_id)),
+                    ),
+                    Ok(_) => {
+                        state.lock().await.peer_keys.remove(&pid);
+                        log(
+                            event_tx,
+                            "WARN",
+                            format!(
+                                "Revoked trust for {} — re-approval required on next connection",
+                                short_id(&peer_id)
+                            ),
+                        );
+                        let _ = event_tx.send(GuiEvent::PeerKeyRevoked {
+                            peer_id: peer_id.clone(),
+                        });
+                        // Re-send TrustedPeers so the GUI list refreshes
+                        let _ = event_tx.send(GuiEvent::TrustedPeers {
+                            peer_ids: tofu::list_trusted_peers(),
+                        });
+                    }
+                }
+            }
+        }
+
+        GuiCommand::SetVaultMode { enabled } => {
+            if enabled {
+                let has_key = state.lock().await.vault_key.is_some();
+                if !has_key {
+                    // Auto-generate vault key if it doesn't exist
+                    let mut p = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+                    p.push(".vitruvius");
+                    p.push("vault.key");
+                    if let Some(parent) = p.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    match crate::crypto::generate_key(&p) {
+                        Err(e) => {
+                            log(
+                                event_tx,
+                                "ERROR",
+                                format!("Failed to generate vault key: {e}"),
+                            );
+                            return;
+                        }
+                        Ok(_) => match crate::crypto::load_key(&p) {
+                            Err(e) => {
+                                log(event_tx, "ERROR", format!("Failed to load vault key: {e}"));
+                                return;
+                            }
+                            Ok(key) => {
+                                let mut st = state.lock().await;
+                                st.vault_key = Some(key);
+                                log(
+                                    event_tx,
+                                    "OK",
+                                    format!("Vault key auto-generated at {}", p.display()),
+                                );
+                            }
+                        },
+                    }
+                }
+            }
+            state.lock().await.vault_mode = enabled;
+            log(
+                event_tx,
+                "OK",
+                format!(
+                    "Vault mode {} — {}",
+                    if enabled { "enabled" } else { "disabled" },
+                    if enabled {
+                        "new received files stored as encrypted .vit blobs"
+                    } else {
+                        "received files stored as readable plaintext"
+                    }
+                ),
+            );
+            let _ = event_tx.send(GuiEvent::VaultModeChanged {
+                vault_mode: enabled,
+            });
+        }
+
         GuiCommand::DecryptFile { name, dest } => {
+            // Resolve <sync>/<name>.vit and write decrypted plaintext to `dest`.
             let (sync_path, vault_key) = {
                 let st = state.lock().await;
                 (st.sync_path.clone(), st.vault_key)
@@ -488,24 +431,11 @@ pub async fn on_command(
                         "OK",
                         format!("Decrypted {name} → {dest} ({n} bytes)"),
                     );
-                    let (vault_mode, vk) = {
-                        let st = state.lock().await;
-                        (st.vault_mode, st.vault_key)
-                    };
-                    if let Ok(files) =
-                        storage::list_folder_modal(&folder, vault_mode, vk.as_ref()).await
-                    {
-                        let listing = files
-                            .iter()
-                            .map(|f| crate::gui::GuiFileInfo {
-                                name: f.file_name.clone(),
-                                size: f.file_size,
-                                chunks: f.total_chunks,
-                            })
-                            .collect();
-                        let _ =
-                            event_tx.send(crate::gui::GuiEvent::FolderListing { files: listing });
-                    }
+                    let _ = event_tx.send(GuiEvent::DecryptComplete {
+                        name: name.clone(),
+                        dest: dest.clone(),
+                        size: n,
+                    });
                 }
                 Err(e) => log(
                     event_tx,
@@ -631,19 +561,20 @@ pub async fn on_swarm_event(
             });
             log(event_tx, "OK", format!("Connected to {display}"));
 
-            // ── Load stored TOFU key BEFORE doing anything else ───────────────
+            // ── Load stored TOFU key FIRST, before any network messages ────────
+            // Critical ordering: ManifestRequest must be sent AFTER the peer key
+            // is loaded into peer_keys. Sending it before caused a race where the
+            // remote received a manifest request, called key_for_peer() → None,
+            // and returned Empty ("no sync folder set") every single reconnect.
             let already_have_key = {
                 let mut st = state.lock().await;
-                let already = st.peer_keys.contains_key(&peer_id);
-                if !already {
-                    if let Some(key) = tofu::get_peer_key(&pid_str) {
-                        st.peer_keys.insert(peer_id, key);
-                        true
-                    } else {
-                        false
-                    }
-                } else {
+                if st.peer_keys.contains_key(&peer_id) {
                     true
+                } else if let Some(key) = tofu::get_peer_key(&pid_str) {
+                    st.peer_keys.insert(peer_id, key);
+                    true
+                } else {
+                    false
                 }
             };
             if already_have_key {
@@ -654,21 +585,21 @@ pub async fn on_swarm_event(
                 );
             }
 
-            let (have_folder, my_name) = folder_status(&state).await;
-            let use_tofu = !state.lock().await.shared_key_from_cli;
+            // Use TOFU unless operator explicitly distributed a shared key via --key-path.
+            // An auto-generated local key does NOT count — each peer has a different one.
+            let need_tofu = !state.lock().await.shared_key_from_cli;
 
+            let (have_folder, my_name) = folder_status(&state).await;
             if have_folder {
                 state.lock().await.announced_to.insert(peer_id);
                 swarm.behaviour_mut().rr.send_request(
                     &peer_id,
                     SyncMessage::FolderAnnouncement { node_name: my_name },
                 );
-
-                if already_have_key || !use_tofu {
-                    // ── PUSH MODEL: push our manifest immediately ─────────────
-                    // We have a key and a folder — don't wait for them to request
-                    // our manifest. Push it now and also request theirs.
-                    push_manifest_to_peer(peer_id, &pid_str, swarm, &state, event_tx).await;
+                // Only send ManifestRequest now if we already have a key.
+                // If TOFU is still needed, the request is sent after key exchange
+                // completes so it goes out encrypted.
+                if already_have_key || !need_tofu {
                     swarm
                         .behaviour_mut()
                         .rr
@@ -677,7 +608,7 @@ pub async fn on_swarm_event(
                         event_tx,
                         "INFO",
                         format!(
-                            "Pushed manifest to {} and requested theirs",
+                            "Folder already set — announced to {} and requesting their manifest",
                             short_id(&pid_str)
                         ),
                     );
@@ -686,15 +617,18 @@ pub async fn on_swarm_event(
                         event_tx,
                         "INFO",
                         format!(
-                            "Folder set — waiting for TOFU with {} before pushing manifest",
+                            "Folder set — waiting for TOFU with {} before requesting manifest",
                             short_id(&pid_str)
                         ),
                     );
                 }
             }
 
-            if use_tofu && !already_have_key {
+            if need_tofu && !already_have_key {
                 // Only the peer with the lexicographically lower PeerId initiates.
+                // This prevents both sides sending KeyExchangePropose simultaneously,
+                // which causes a race where both call set_peer_key twice with
+                // different ephemeral secrets, producing mismatched final keys.
                 let local_id = swarm.local_peer_id().to_string();
                 if local_id < pid_str {
                     let (secret_bytes, public_bytes) = tofu::generate_keypair();
@@ -752,12 +686,7 @@ pub async fn on_swarm_event(
             match message {
                 request_response::Message::Request {
                     channel, request, ..
-                } => {
-                    on_request(
-                        request, channel, peer, &pid_str, swarm, &state, event_tx, transfers,
-                    )
-                    .await
-                }
+                } => on_request(request, channel, peer, &pid_str, swarm, &state, event_tx).await,
                 request_response::Message::Response { response, .. } => {
                     on_response(response, peer, &pid_str, swarm, &state, event_tx, transfers).await
                 }
@@ -771,6 +700,32 @@ pub async fn on_swarm_event(
                 peer_id: pid_str,
                 error: error.to_string(),
             });
+        }
+
+        SwarmEvent::Behaviour(MyBehaviourEvent::Rr(request_response::Event::OutboundFailure {
+            peer,
+            error,
+            ..
+        })) => {
+            let pid_str = peer.to_string();
+            warn!("OutboundFailure to {}: {:?}", short_id(&pid_str), error);
+            log(
+                event_tx,
+                "ERROR",
+                format!(
+                    "Request to {} failed — {error:?}. Check connection and retry.",
+                    short_id(&pid_str)
+                ),
+            );
+        }
+
+        SwarmEvent::Behaviour(MyBehaviourEvent::Rr(request_response::Event::InboundFailure {
+            peer,
+            error,
+            ..
+        })) => {
+            let pid_str = peer.to_string();
+            warn!("InboundFailure from {}: {:?}", short_id(&pid_str), error);
         }
 
         _ => {}
@@ -789,8 +744,19 @@ async fn on_request(
     swarm: &mut Swarm<MyBehaviour>,
     state: &Arc<Mutex<AppState>>,
     event_tx: &mpsc::UnboundedSender<GuiEvent>,
-    transfers: &mut HashMap<PeerId, PeerDownload>,
 ) {
+    // ── Always load stored TOFU key before processing any request ────────────
+    // ConnectionEstablished does this too, but requests can arrive in the same
+    // tick before that event is processed. Loading here is idempotent and free.
+    {
+        let mut st = state.lock().await;
+        if !st.peer_keys.contains_key(&peer) {
+            if let Some(key) = tofu::get_peer_key(pid_str) {
+                st.peer_keys.insert(peer, key);
+            }
+        }
+    }
+
     match request {
         SyncMessage::FolderAnnouncement {
             node_name: peer_name,
@@ -803,38 +769,22 @@ async fn on_request(
             log(
                 event_tx,
                 "INFO",
-                format!("{peer_name} announced their folder"),
+                format!("{peer_name} announced their folder — requesting their manifest …"),
             );
             let _ = swarm
                 .behaviour_mut()
                 .rr
                 .send_response(channel, SyncMessage::Ack);
 
-            // ── PUSH MODEL: they told us they have a folder — push ours back ──
-            // This is the key fix for the race condition. Instead of sending a
-            // ManifestRequest (which requires THEM to have their folder ready
-            // to respond), we push OUR manifest to them. They'll push theirs
-            // back when their folder is set, via their own FolderAnnouncement
-            // handler or SetFolder handler.
-            //
-            // We still also send ManifestRequest as a fallback for peers running
-            // older versions that don't push, but it's no longer load-bearing.
-            let is_trusted = {
-                let st = state.lock().await;
-                st.peer_keys.contains_key(&peer) || tofu::has_peer_key(pid_str)
-            };
+            // ── THE MISSING REQUEST ───────────────────────────────────────────
+            // The peer just told us "I have files."  Actually request their
+            // manifest now so sync happens automatically without the user
+            // having to click "Request Sync" every time.
+            swarm
+                .behaviour_mut()
+                .rr
+                .send_request(&peer, SyncMessage::ManifestRequest);
 
-            if is_trusted {
-                // Push our manifest to them.
-                push_manifest_to_peer(peer, pid_str, swarm, state, event_tx).await;
-                // Also request theirs as fallback for non-push peers.
-                swarm
-                    .behaviour_mut()
-                    .rr
-                    .send_request(&peer, SyncMessage::ManifestRequest);
-            }
-
-            // If we haven't announced back yet, do so now.
             let (have_folder, my_name) = folder_status(state).await;
             if have_folder {
                 let already = state.lock().await.announced_to.contains(&peer);
@@ -846,11 +796,39 @@ async fn on_request(
                     );
                 }
             }
+
+            // ── Multi-peer mesh ───────────────────────────────────────────────
+            // When any peer announces, request manifests from all OTHER keyed
+            // peers too. C joins → A asks B for B's latest → full N-way sync.
+            let other_peers: Vec<PeerId> = {
+                let st = state.lock().await;
+                st.connected_peers
+                    .iter()
+                    .filter(|&&p| p != peer)
+                    .filter(|p| st.peer_keys.contains_key(p))
+                    .copied()
+                    .collect()
+            };
+            for other in other_peers {
+                swarm
+                    .behaviour_mut()
+                    .rr
+                    .send_request(&other, SyncMessage::ManifestRequest);
+                log(
+                    event_tx,
+                    "INFO",
+                    format!(
+                        "New peer joined mesh — refreshing from {} …",
+                        short_id(&other.to_string())
+                    ),
+                );
+            }
         }
 
         SyncMessage::ManifestRequest => {
-            // Mirror the operator-shared key into the per-peer table only when
-            // it was explicitly distributed via --key-path.
+            // Mirror the operator-shared key into peer_keys ONLY when it was
+            // explicitly distributed via --key-path. Auto-generated keys must not
+            // be mirrored — each peer has a different one; TOFU handles this.
             {
                 let mut st = state.lock().await;
                 if !st.peer_keys.contains_key(&peer)
@@ -917,6 +895,8 @@ async fn on_request(
                                 return;
                             }
                         };
+                        // Remember which file_ids we just told this peer about
+                        // so we can resolve their EncryptedChunkRequest.
                         state.lock().await.outbound_file_ids.insert(peer, id_map);
                         let _ = swarm.behaviour_mut().rr.send_response(channel, resp);
                     } else {
@@ -986,6 +966,7 @@ async fn on_request(
             ref file_name,
             chunk_index,
         } => {
+            // Grab both the sync path and the encryption key in one lock.
             let (path, enc_key) = {
                 let st = state.lock().await;
                 (st.sync_path.clone(), st.key_for_peer(&peer))
@@ -1001,6 +982,7 @@ async fn on_request(
                     );
                 }
                 Some(ref p) => {
+                    // Pass encryption key into get_chunk — it encrypts transparently.
                     let resp: SyncMessage =
                         storage::get_chunk(p, file_name, chunk_index, enc_key.as_ref())
                             .await
@@ -1066,7 +1048,6 @@ async fn on_request(
                     ),
                 );
 
-                // For file changes, use ManifestRequest since we need fresh state.
                 swarm
                     .behaviour_mut()
                     .rr
@@ -1086,15 +1067,6 @@ async fn on_request(
                 for component in file_name.split('/') {
                     full_path.push(component);
                 }
-
-                state.lock().await.deleting_files.insert(full_path.clone());
-                let state2 = Arc::clone(state);
-                let guarded_path = full_path.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(2000)).await;
-                    state2.lock().await.deleting_files.remove(&guarded_path);
-                });
-
                 if let Err(e) = std::fs::remove_file(&full_path) {
                     log(
                         event_tx,
@@ -1110,43 +1082,54 @@ async fn on_request(
                 }
             }
         }
-
         SyncMessage::KeyExchangePropose {
             public_key: their_public,
         } => {
+            // Check if we already have a key for this peer — ignore duplicate proposals.
             let already_keyed = {
                 let st = state.lock().await;
                 st.peer_keys.contains_key(&peer) || tofu::has_peer_key(pid_str)
             };
             if already_keyed {
-                state
-                    .lock()
-                    .await
-                    .pending_approvals
-                    .insert(peer, their_public);
-
-                let display = peer_display_name(state, pid_str).await;
-                log(
-                    event_tx,
-                    "WARN",
-                    format!(
-                        "SECURITY: already-trusted peer {} is proposing a NEW key \
-                         exchange. This could be a legitimate re-key after key loss, \
-                         or a MITM attempt. Approve ONLY if you recognise this device.",
-                        display
-                    ),
-                );
-                let _ = event_tx.send(GuiEvent::PeerApprovalRequired {
-                    peer_id: pid_str.to_string(),
-                    display_name: format!("⚠ RE-KEY: {display}"),
-                });
-                let _ = swarm
-                    .behaviour_mut()
-                    .rr
-                    .send_response(channel, SyncMessage::Ack);
+                // This peer is already trusted (in our TOFU store) but they are
+                // proposing a new exchange — meaning they lost their key store.
+                // Re-key silently without requiring user approval again: generate
+                // a new ephemeral pair, derive a fresh shared key, and respond
+                // with KeyExchangeAccept so both sides agree on the new key.
+                let (secret_bytes, our_public) = tofu::generate_keypair();
+                match tofu::derive_shared_key(&secret_bytes, &their_public) {
+                    Ok(derived_key) => {
+                        let fingerprint = tofu::key_fingerprint(&derived_key);
+                        state.lock().await.set_peer_key(peer, derived_key);
+                        let _ = swarm.behaviour_mut().rr.send_response(
+                            channel,
+                            SyncMessage::KeyExchangeAccept {
+                                public_key: our_public,
+                            },
+                        );
+                        log(
+                            event_tx,
+                            "OK",
+                            format!(
+                                "Re-keyed with already-trusted {} | fingerprint: {}",
+                                short_id(pid_str),
+                                fingerprint
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        log(event_tx, "ERROR", format!("Re-keying failed: {e}"));
+                        let _ = swarm
+                            .behaviour_mut()
+                            .rr
+                            .send_response(channel, SyncMessage::Ack);
+                    }
+                }
                 return;
             }
 
+            // Store their public key — don't derive anything yet.
+            // The user must explicitly approve this peer before we respond.
             state
                 .lock()
                 .await
@@ -1168,15 +1151,17 @@ async fn on_request(
                 display_name: display,
             });
 
+            // Don't send KeyExchangeAccept yet — we send Ack to keep the channel alive.
             let _ = swarm
                 .behaviour_mut()
                 .rr
                 .send_response(channel, SyncMessage::Ack);
         }
-
         SyncMessage::KeyExchangeAccept {
             public_key: their_public,
         } => {
+            // We receive this when the remote peer's user approved us.
+            // Retrieve our ephemeral secret and derive the shared key.
             let our_secret = state.lock().await.pending_exchanges.remove(&peer);
             match our_secret {
                 None => {
@@ -1197,29 +1182,11 @@ async fn on_request(
                             event_tx,
                             "OK",
                             format!(
-                                "Approved {} — key established | fingerprint: {}",
+                                "TOFU established with {} | fingerprint: {}",
                                 short_id(pid_str),
                                 fingerprint
                             ),
                         );
-                        // ── PUSH MODEL: key just established via approval ─────
-                        // Now that we have a key, push our manifest and request theirs.
-                        let has_folder = state.lock().await.sync_path.is_some();
-                        if has_folder {
-                            push_manifest_to_peer(peer, pid_str, swarm, state, event_tx).await;
-                            swarm
-                                .behaviour_mut()
-                                .rr
-                                .send_request(&peer, SyncMessage::ManifestRequest);
-                            log(
-                                event_tx,
-                                "INFO",
-                                format!(
-                                    "TOFU approved — pushed manifest to {} and requested theirs",
-                                    short_id(pid_str)
-                                ),
-                            );
-                        }
                     }
                     Err(e) => {
                         log(event_tx, "ERROR", format!("Key derivation failed: {e}"));
@@ -1230,230 +1197,6 @@ async fn on_request(
                 .behaviour_mut()
                 .rr
                 .send_response(channel, SyncMessage::Ack);
-        }
-
-        // ── Pushed manifest (EncryptedManifest arriving as a request) ────────
-        //
-        // push_manifest_to_peer() uses send_request, so the pushed manifest
-        // lands here in on_request, not in on_response. We ack the channel
-        // immediately, then run exactly the same processing logic as the
-        // on_response EncryptedManifest arm so the download scheduler fires.
-        SyncMessage::EncryptedManifest { ciphertext } => {
-            // Ack first so the channel isn't left hanging.
-            let _ = swarm
-                .behaviour_mut()
-                .rr
-                .send_response(channel, SyncMessage::Ack);
-
-            let peer_key = state.lock().await.key_for_peer(&peer);
-            let key = match peer_key {
-                Some(k) => k,
-                None => {
-                    log(
-                        event_tx,
-                        "WARN",
-                        format!(
-                            "Pushed EncryptedManifest from {} but no transport key — ignoring",
-                            short_id(pid_str)
-                        ),
-                    );
-                    return;
-                }
-            };
-            let payload = match storage::decrypt_manifest(&key, &ciphertext) {
-                Ok(p) => p,
-                Err(e) => {
-                    log(
-                        event_tx,
-                        "ERROR",
-                        format!(
-                            "Pushed manifest decrypt failed from {}: {e}",
-                            short_id(pid_str)
-                        ),
-                    );
-                    return;
-                }
-            };
-
-            let peer_name = payload.node_name.clone();
-            state
-                .lock()
-                .await
-                .peer_names
-                .insert(pid_str.to_string(), peer_name.clone());
-
-            if payload.files.is_empty() {
-                log(
-                    event_tx,
-                    "INFO",
-                    format!("{peer_name} pushed manifest with no files"),
-                );
-                return;
-            }
-
-            let (sync_path, vault_mode) = {
-                let st = state.lock().await;
-                (st.sync_path.clone(), st.vault_mode)
-            };
-            let sync_path = match sync_path {
-                Some(p) => p,
-                None => {
-                    log(
-                        event_tx,
-                        "WARN",
-                        format!(
-                            "Received pushed manifest from {peer_name} but no sync folder set — will process when folder is set"
-                        ),
-                    );
-                    return;
-                }
-            };
-
-            // Build inbound id map so chunk responses can be resolved.
-            let mut info_map: HashMap<[u8; 16], InboundFileInfo> = HashMap::new();
-            for fe in &payload.files {
-                info_map.insert(
-                    fe.file_id,
-                    InboundFileInfo {
-                        file_name: fe.file_name.clone(),
-                        file_size: fe.file_size,
-                        total_chunks: fe.total_chunks,
-                        blinded_chunk_hashes: fe.blinded_chunk_hashes.clone(),
-                    },
-                );
-            }
-            state.lock().await.inbound_file_ids.insert(peer, info_map);
-
-            let dl = transfers.entry(peer).or_insert_with(PeerDownload::new);
-            let mut newly_queued = 0usize;
-            for fe in &payload.files {
-                if rel_path_exists(&sync_path, &fe.file_name) {
-                    continue;
-                }
-                if vault_mode && vault_path_exists(&sync_path, &fe.file_name) {
-                    continue;
-                }
-                if dl.active.contains_key(&fe.file_name) {
-                    continue;
-                }
-                if dl.queue.iter().any(|p| p.file_name == fe.file_name) {
-                    continue;
-                }
-                dl.queue.push_back(PendingFile {
-                    file_name: fe.file_name.clone(),
-                    total_chunks: fe.total_chunks as usize,
-                    file_size: fe.file_size,
-                    chunk_hashes: fe.blinded_chunk_hashes.clone(),
-                    file_id: Some(fe.file_id),
-                });
-                newly_queued += 1;
-            }
-
-            let total_pending = dl.active.len() + dl.queue.len();
-            if total_pending == 0 {
-                log(
-                    event_tx,
-                    "OK",
-                    format!("All files from {peer_name} already synced"),
-                );
-                return;
-            }
-
-            log(
-                event_tx,
-                "INFO",
-                format!(
-                    "{peer_name} pushed manifest: {newly_queued} file(s) queued ({} active, {} waiting)",
-                    dl.active.len(),
-                    dl.queue.len()
-                ),
-            );
-
-            start_queued_files(peer, &sync_path, dl, swarm, event_tx, pid_str);
-        }
-
-        // ── Pushed plaintext Manifest arriving as a request ───────────────────
-        SyncMessage::Manifest {
-            node_name: peer_name,
-            ref files,
-        } => {
-            let _ = swarm
-                .behaviour_mut()
-                .rr
-                .send_response(channel, SyncMessage::Ack);
-
-            state
-                .lock()
-                .await
-                .peer_names
-                .insert(pid_str.to_string(), peer_name.clone());
-
-            if files.is_empty() {
-                log(
-                    event_tx,
-                    "INFO",
-                    format!("{peer_name} pushed manifest with no files"),
-                );
-                return;
-            }
-
-            let sync_path = match state.lock().await.sync_path.clone() {
-                Some(p) => p,
-                None => {
-                    log(
-                        event_tx,
-                        "WARN",
-                        "Received pushed manifest but no sync folder set!".into(),
-                    );
-                    return;
-                }
-            };
-
-            let dl = transfers.entry(peer).or_insert_with(PeerDownload::new);
-            let mut newly_queued = 0usize;
-            for fe in files {
-                if rel_path_exists(&sync_path, &fe.file_name) {
-                    continue;
-                }
-                if dl.active.contains_key(&fe.file_name) {
-                    continue;
-                }
-                if dl.queue.iter().any(|p| p.file_name == fe.file_name) {
-                    continue;
-                }
-                dl.queue.push_back(PendingFile::from(fe));
-                newly_queued += 1;
-            }
-
-            if dl.active.len() + dl.queue.len() == 0 {
-                log(
-                    event_tx,
-                    "OK",
-                    format!("All files from {peer_name} already synced"),
-                );
-                return;
-            }
-
-            log(
-                event_tx,
-                "INFO",
-                format!("{peer_name} pushed manifest: {newly_queued} file(s) queued",),
-            );
-
-            start_queued_files(peer, &sync_path, dl, swarm, event_tx, pid_str);
-        }
-
-        // ── Pushed Empty — peer has no files, nothing to do ───────────────────
-        SyncMessage::Empty => {
-            let _ = swarm
-                .behaviour_mut()
-                .rr
-                .send_response(channel, SyncMessage::Ack);
-            log(
-                event_tx,
-                "INFO",
-                format!("{} has no files to offer", short_id(pid_str)),
-            );
         }
 
         _ => {
@@ -1480,12 +1223,22 @@ async fn on_response(
     event_tx: &mpsc::UnboundedSender<GuiEvent>,
     transfers: &mut HashMap<PeerId, PeerDownload>,
 ) {
+    // ── Always load stored TOFU key before processing any response ───────────
+    {
+        let mut st = state.lock().await;
+        if !st.peer_keys.contains_key(&peer) {
+            if let Some(key) = tofu::get_peer_key(pid_str) {
+                st.peer_keys.insert(peer, key);
+            }
+        }
+    }
+
     match response {
         SyncMessage::Ack => {}
-
         SyncMessage::KeyExchangeAccept {
             public_key: their_public,
         } => {
+            // We initiated — retrieve our pending secret and derive the shared key.
             let our_secret = state.lock().await.pending_exchanges.remove(&peer);
 
             match our_secret {
@@ -1507,15 +1260,28 @@ async fn on_response(
                                 fingerprint,
                             ),
                         );
-                        // ── PUSH MODEL: TOFU complete — push our manifest ─────
-                        // Key is now established. Push our manifest immediately
-                        // and request theirs. This is the main path that was
-                        // broken before: after TOFU we'd only send ManifestRequest,
-                        // but if the remote hadn't set their folder yet they'd
-                        // respond Empty and we'd never sync.
+                        // Broadcast updated VaultStatus so GUI security pill refreshes.
+                        {
+                            let st = state.lock().await;
+                            let wire_encrypted =
+                                st.encryption_key.is_some() || !st.peer_keys.is_empty();
+                            let fp = st
+                                .encryption_key
+                                .or_else(|| st.peer_keys.values().next().copied())
+                                .map(|k| crate::crypto::short_fingerprint(&k))
+                                .unwrap_or_else(|| "—".to_string());
+                            let encrypted_protocol = st.encrypted_protocol;
+                            drop(st);
+                            let _ = event_tx.send(GuiEvent::VaultStatus {
+                                wire_encrypted,
+                                encrypted_protocol,
+                                key_fingerprint: fp,
+                            });
+                        }
+                        // Key is now live — request the manifest so sync kicks
+                        // off automatically without the user clicking anything.
                         let has_folder = state.lock().await.sync_path.is_some();
                         if has_folder {
-                            push_manifest_to_peer(peer, pid_str, swarm, state, event_tx).await;
                             swarm
                                 .behaviour_mut()
                                 .rr
@@ -1524,7 +1290,7 @@ async fn on_response(
                                 event_tx,
                                 "INFO",
                                 format!(
-                                    "TOFU complete — pushed manifest to {} and requested theirs",
+                                    "TOFU complete — requesting manifest from {} …",
                                     short_id(pid_str)
                                 ),
                             );
@@ -1537,8 +1303,16 @@ async fn on_response(
             }
         }
 
-        // ── Receiving a pushed/requested EncryptedManifest from a peer ────────
         SyncMessage::EncryptedManifest { ciphertext } => {
+            log(
+                event_tx,
+                "INFO",
+                format!(
+                    "Received encrypted manifest from {} ({} bytes) — decrypting …",
+                    short_id(pid_str),
+                    ciphertext.len()
+                ),
+            );
             let peer_key = state.lock().await.key_for_peer(&peer);
             let key = match peer_key {
                 Some(k) => k,
@@ -1597,6 +1371,8 @@ async fn on_response(
                 }
             };
 
+            // Cache id → InboundFileInfo so we can later look up filenames
+            // when EncryptedChunkResponse arrives.
             let mut info_map: HashMap<[u8; 16], InboundFileInfo> = HashMap::new();
             for fe in &payload.files {
                 info_map.insert(
@@ -1631,6 +1407,9 @@ async fn on_response(
                     file_name: fe.file_name.clone(),
                     total_chunks: fe.total_chunks as usize,
                     file_size: fe.file_size,
+                    // For encrypted-protocol files, chunk_hashes carries the
+                    // BLINDED hashes — receiver verifies against these via
+                    // verify_chunk_blinded(plaintext, expected, transport_key).
                     chunk_hashes: fe.blinded_chunk_hashes.clone(),
                     file_id: Some(fe.file_id),
                 });
@@ -1660,7 +1439,6 @@ async fn on_response(
             start_queued_files(peer, &sync_path, dl, swarm, event_tx, pid_str);
         }
 
-        // ── Receiving a pushed/requested plaintext Manifest from a peer ───────
         SyncMessage::Manifest {
             node_name: peer_name,
             ref files,
@@ -1734,17 +1512,13 @@ async fn on_response(
         }
 
         SyncMessage::Empty => {
-            // Under the push model this is now much rarer — it only fires when
-            // the remote genuinely has no files, not just because they haven't
-            // set their folder yet. We no longer hammer them with ManifestRequests
-            // so this won't loop.
             let _ = event_tx.send(GuiEvent::RemoteEmpty {
                 peer_id: pid_str.to_string(),
             });
             log(
                 event_tx,
                 "INFO",
-                format!("{} has no files to offer", short_id(pid_str)),
+                format!("{} has no sync folder set yet", short_id(pid_str)),
             );
         }
 
@@ -1759,29 +1533,36 @@ async fn on_response(
                 None => return,
             };
 
+            // ── DECRYPTION ────────────────────────────────────────────────────
+            // Decrypt BEFORE hash verification. The hash in the manifest is a
+            // plaintext hash, so we must have plaintext before we can verify it.
+            // If no key is set, pass the data through unchanged (plaintext mode).
             let enc_key = state.lock().await.key_for_peer(&peer);
             let plaintext = match enc_key {
-                Some(ref key) => match crypto::decrypt(key, data) {
-                    Ok(pt) => pt,
-                    Err(e) => {
-                        log(
-                            event_tx,
-                            "ERROR",
-                            format!(
-                                "{file_name} chunk {chunk_index} decryption failed: {e}. \
+                Some(ref key) => {
+                    match crypto::decrypt(key, data) {
+                        Ok(pt) => pt,
+                        Err(e) => {
+                            log(
+                                event_tx,
+                                "ERROR",
+                                format!(
+                                    "{file_name} chunk {chunk_index} decryption failed: {e}. \
                                      Check that all peers use the same key file."
-                            ),
-                        );
-                        swarm.behaviour_mut().rr.send_request(
-                            &peer,
-                            SyncMessage::ChunkRequest {
-                                file_name: file_name.clone(),
-                                chunk_index,
-                            },
-                        );
-                        return;
+                                ),
+                            );
+                            // Retry the chunk — the sender may have had a transient error.
+                            swarm.behaviour_mut().rr.send_request(
+                                &peer,
+                                SyncMessage::ChunkRequest {
+                                    file_name: file_name.clone(),
+                                    chunk_index,
+                                },
+                            );
+                            return;
+                        }
                     }
-                },
+                }
                 None => data.clone(),
             };
 
@@ -1801,6 +1582,7 @@ async fn on_response(
                 .and_then(|m| m.chunk_hashes.get(chunk_index))
                 .copied();
 
+            // Verify hash against PLAINTEXT — always.
             let verified = expected
                 .map(|h| storage::verify_chunk(&plaintext, &h))
                 .unwrap_or(false);
@@ -1831,6 +1613,7 @@ async fn on_response(
                 return;
             }
 
+            // Store PLAINTEXT in received_chunks — reassemble() writes it directly to disk.
             ts.received_chunks.insert(chunk_index, plaintext);
             ts.last_activity = std::time::Instant::now();
 
@@ -1855,7 +1638,7 @@ async fn on_response(
                 return;
             }
             let dest_path = {
-                let meta = ts.metadata.as_ref().unwrap();
+                let meta = ts.metadata.as_ref().unwrap(); // safe: we checked len above
                 let mut p = ts.sync_dir.clone();
                 for component in meta.file_name.split('/') {
                     p.push(component);
@@ -1878,6 +1661,26 @@ async fn on_response(
                     });
 
                     log(event_tx, "OK", format!("  {fname} saved to disk"));
+
+                    // Refresh the GUI file listing so *.vit vault files appear immediately.
+                    {
+                        let etx = event_tx.clone();
+                        let sp = sync_path.clone();
+                        tokio::spawn(async move {
+                            if let Ok(files) = storage::list_folder_all(&sp).await {
+                                let listing: Vec<GuiFileInfo> = files
+                                    .iter()
+                                    .map(|f| GuiFileInfo {
+                                        name: f.file_name.clone(),
+                                        size: f.file_size,
+                                        chunks: f.total_chunks,
+                                        is_vault: f.is_vault,
+                                    })
+                                    .collect();
+                                let _ = etx.send(GuiEvent::FolderListing { files: listing });
+                            }
+                        });
+                    }
 
                     swarm.behaviour_mut().rr.send_request(
                         &peer,
@@ -1958,6 +1761,7 @@ async fn on_response(
                     return;
                 }
             };
+            // Resolve file_name from inbound id map.
             let file_name = match state
                 .lock()
                 .await
@@ -2075,6 +1879,9 @@ async fn on_response(
             };
             state.lock().await.writing_files.insert(dest_path.clone());
 
+            // Always reassemble as plaintext — zero-knowledge is about the WIRE,
+            // not the disk. The user should be able to open received files immediately.
+            // Vault mode (*.vit at-rest encryption) is opt-in via --vault.
             match storage::reassemble_modal(ts, vault_mode, vault_key.as_ref()).await {
                 Ok(written_path) => {
                     let _ = event_tx.send(GuiEvent::TransferComplete {
@@ -2082,6 +1889,26 @@ async fn on_response(
                         file_name: file_name.clone(),
                     });
                     log(event_tx, "OK", format!("  {file_name} saved to disk"));
+
+                    // Refresh the GUI file listing so *.vit vault files appear immediately.
+                    {
+                        let etx = event_tx.clone();
+                        let sp = sync_path.clone();
+                        tokio::spawn(async move {
+                            if let Ok(files) = storage::list_folder_all(&sp).await {
+                                let listing: Vec<GuiFileInfo> = files
+                                    .iter()
+                                    .map(|f| GuiFileInfo {
+                                        name: f.file_name.clone(),
+                                        size: f.file_size,
+                                        chunks: f.total_chunks,
+                                        is_vault: f.is_vault,
+                                    })
+                                    .collect();
+                                let _ = etx.send(GuiEvent::FolderListing { files: listing });
+                            }
+                        });
+                    }
 
                     swarm.behaviour_mut().rr.send_request(
                         &peer,
@@ -2093,9 +1920,10 @@ async fn on_response(
                     start_queued_files(peer, &sync_path, dl, swarm, event_tx, pid_str);
 
                     let state2 = Arc::clone(state);
+                    let wp = written_path.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(1500)).await;
-                        state2.lock().await.writing_files.remove(&written_path);
+                        state2.lock().await.writing_files.remove(&wp);
                     });
                 }
                 Err(e) => {
@@ -2167,9 +1995,14 @@ fn start_queued_files(
             total_chunks: pf.total_chunks,
             file_size: pf.file_size,
             chunk_hashes: pf.chunk_hashes.clone(),
+            is_vault: false,
         });
         ts.file_id = pf.file_id;
 
+        // Local dedup is only meaningful when both the manifest's hashes and
+        // the local index speak the same hash space, which is plaintext-mode
+        // legacy. Skip dedup for encrypted-protocol files (blinded hashes)
+        // and for vault-mode (files at rest are *.vit blobs).
         let dedup_eligible = pf.file_id.is_none();
         let mut local_hits = 0usize;
         if dedup_eligible {

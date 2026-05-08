@@ -43,11 +43,9 @@ pub struct AppState {
     /// Operator-supplied shared key (--key-path). Mirrored into `peer_keys`
     /// per-connection; not consulted directly during sync.
     pub encryption_key: Option<[u8; 32]>,
-    /// True only when --key-path was explicitly passed on the CLI, meaning the
-    /// operator has pre-distributed an identical key to every peer. In that
-    /// case TOFU is skipped because all peers already share a key.
-    /// False when the transport key was auto-generated locally — peers must
-    /// still go through TOFU to establish a shared key.
+    /// True ONLY when --key-path was explicitly passed on CLI. This means the
+    /// operator pre-distributed a shared key to every peer, so TOFU is skipped.
+    /// False (default) when key is auto-generated — peers must still do TOFU.
     pub shared_key_from_cli: bool,
     /// X25519 public keys of peers that have proposed a TOFU exchange and
     /// are waiting for the local user's approval.
