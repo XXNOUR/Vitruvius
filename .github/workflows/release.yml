@@ -22,7 +22,7 @@ jobs:
           targets: x86_64-unknown-linux-musl,x86_64-pc-windows-gnu
 
       - name: Install cross-compile tools
-        run: sudo apt-get install -y musl-tools gcc-mingw-w64-x86-64
+        run: sudo apt-get update && sudo apt-get install -y musl-tools gcc-mingw-w64-x86-64
 
       - name: Build Linux (static)
         run: cargo build --release --target x86_64-unknown-linux-musl
@@ -30,10 +30,16 @@ jobs:
       - name: Build Windows
         run: cargo build --release --target x86_64-pc-windows-gnu
 
+      - name: Get binary name
+        id: bin
+        run: echo "name=$(cargo metadata --format-version=1 | jq -r '.packages[0].name')" >> $GITHUB_OUTPUT
+
       - name: Rename binaries
         run: |
-          cp target/x86_64-unknown-linux-musl/release/Vitruvuis  vitruvius-linux-x86_64
-          cp target/x86_64-pc-windows-gnu/release/Vitruvuis.exe  vitruvius-windows-x86_64.exe
+          BIN=${{ steps.bin.outputs.name }}
+
+          cp target/x86_64-unknown-linux-musl/release/$BIN vitruvius-linux-x86_64
+          cp target/x86_64-pc-windows-gnu/release/$BIN.exe vitruvius-windows-x86_64.exe
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
