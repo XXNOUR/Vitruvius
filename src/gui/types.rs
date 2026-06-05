@@ -132,12 +132,18 @@ pub enum GuiEvent {
         key_fingerprint: String,
     },
     /// A peer's TOFU key was successfully revoked.
-    PeerKeyRevoked { peer_id: String },
+    PeerKeyRevoked {
+        peer_id: String,
+    },
     /// Vault mode (at-rest .vit encryption) was toggled at runtime.
-    VaultModeChanged { vault_mode: bool },
+    VaultModeChanged {
+        vault_mode: bool,
+    },
     /// The list of all peer IDs with stored TOFU keys.
     /// Sent once on WS connect and again after any revocation.
-    TrustedPeers { peer_ids: Vec<String> },
+    TrustedPeers {
+        peer_ids: Vec<String>,
+    },
     /// A vault file was successfully decrypted.
     DecryptComplete {
         name: String,

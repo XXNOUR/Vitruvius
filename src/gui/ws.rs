@@ -11,23 +11,23 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tracing::{error, warn};
 
-use super::types::{GuiCommand, GuiEvent, GuiFileInfo};
 use crate::crypto;
-use crate::state::{short_id, AppState};
+use crate::state::{AppState, short_id};
 use crate::storage;
 use crate::tofu;
+use super::types::{GuiCommand, GuiEvent, GuiFileInfo};
 
 pub async fn handle_client(
-    stream: TcpStream,
-    cmd_tx: mpsc::UnboundedSender<GuiCommand>,
-    brx: &mut tokio::sync::broadcast::Receiver<String>,
+    stream:     TcpStream,
+    cmd_tx:     mpsc::UnboundedSender<GuiCommand>,
+    brx:        &mut tokio::sync::broadcast::Receiver<String>,
     my_peer_id: String,
-    my_name: String,
-    state: Arc<Mutex<AppState>>,
+    my_name:    String,
+    state:      Arc<Mutex<AppState>>,
 ) {
     // Upgrade raw TCP → WebSocket; silently ignore anything that isn't a
     // proper WS handshake (browser retries, favicon requests, health checks…)
@@ -39,14 +39,10 @@ pub async fn handle_client(
 
     // ── Send state snapshot ───────────────────────────────────────────────────
 
-    send(
-        &mut ws_tx,
-        &GuiEvent::Identity {
-            peer_id: my_peer_id.clone(),
-            node_name: my_name.clone(),
-        },
-    )
-    .await;
+    send(&mut ws_tx, &GuiEvent::Identity {
+        peer_id:   my_peer_id.clone(),
+        node_name: my_name.clone(),
+    }).await;
 
     // ── Wire-ZK posture snapshot ──────────────────────────────────────────────
     // Show the WIRE encryption status, not the at-rest vault status.
@@ -57,8 +53,7 @@ pub async fn handle_client(
     {
         let st = state.lock().await;
         let wire_encrypted = st.encryption_key.is_some() || !st.peer_keys.is_empty();
-        let fp = st
-            .encryption_key
+        let fp = st.encryption_key
             .or_else(|| st.peer_keys.values().next().copied())
             .map(|k| crypto::short_fingerprint(&k))
             .unwrap_or_else(|| "—".to_string());
@@ -88,44 +83,30 @@ pub async fn handle_client(
 
         // Every peer currently known from mDNS
         for (pid, addr) in &st.known_addrs {
-            let name = st
-                .peer_names
-                .get(pid)
-                .cloned()
+            let name = st.peer_names.get(pid).cloned()
                 .unwrap_or_else(|| format!("Node-{}", short_id(pid)));
-            send(
-                &mut ws_tx,
-                &GuiEvent::PeerDiscovered {
-                    peer_id: pid.clone(),
-                    addr: addr.clone(),
-                    node_name: name,
-                },
-            )
-            .await;
+            send(&mut ws_tx, &GuiEvent::PeerDiscovered {
+                peer_id:   pid.clone(),
+                addr:      addr.clone(),
+                node_name: name,
+            }).await;
         }
 
         // Current folder listing if a folder is set
         if let Some(ref path) = st.sync_path {
             if let Ok(files) = storage::list_folder_all(path).await {
-                let listing = files
-                    .iter()
-                    .map(|f| GuiFileInfo {
-                        name: f.file_name.clone(),
-                        size: f.file_size,
-                        chunks: f.total_chunks,
-                        is_vault: f.is_vault,
-                    })
-                    .collect();
+                let listing = files.iter().map(|f| GuiFileInfo {
+                    name:     f.file_name.clone(),
+                    size:     f.file_size,
+                    chunks:   f.total_chunks,
+                    is_vault: f.is_vault,
+                }).collect();
                 send(&mut ws_tx, &GuiEvent::FolderListing { files: listing }).await;
             }
-            send(
-                &mut ws_tx,
-                &GuiEvent::Log {
-                    level: "OK".into(),
-                    message: format!("Sync folder: {}", path.display()),
-                },
-            )
-            .await;
+            send(&mut ws_tx, &GuiEvent::Log {
+                level:   "OK".into(),
+                message: format!("Sync folder: {}", path.display()),
+            }).await;
         }
     }
 

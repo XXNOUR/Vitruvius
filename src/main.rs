@@ -168,11 +168,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if let Some((src, dst)) = import_args {
         let key = vault_key.expect("vault_key required for import");
         let n = storage::import_plaintext_dir_into_vault(&src, &dst, &key)?;
-        println!(
-            "Imported {n} file(s) from {} into vault {}",
-            src.display(),
-            dst.display()
-        );
+        println!("Imported {n} file(s) from {} into vault {}", src.display(), dst.display());
         return Ok(());
     }
     if let Some((src, dst)) = export_args {

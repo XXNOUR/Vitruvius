@@ -65,11 +65,7 @@ impl SecretKey {
 impl std::fmt::Debug for SecretKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Never print the actual bytes.
-        write!(
-            f,
-            "SecretKey(<redacted, fp={}>)",
-            short_fingerprint(&self.0)
-        )
+        write!(f, "SecretKey(<redacted, fp={}>)", short_fingerprint(&self.0))
     }
 }
 
@@ -155,13 +151,7 @@ pub fn encrypt_with_aad(key: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> Result<
     let nonce = Nonce::from(nonce_bytes);
 
     let ciphertext = cipher
-        .encrypt(
-            &nonce,
-            Payload {
-                msg: plaintext,
-                aad,
-            },
-        )
+        .encrypt(&nonce, Payload { msg: plaintext, aad })
         .map_err(|e| anyhow!("Encryption failed: {e}"))?;
 
     let mut output = Vec::with_capacity(12 + ciphertext.len());
@@ -183,13 +173,7 @@ pub fn decrypt_with_aad(key: &[u8; 32], data: &[u8], aad: &[u8]) -> Result<Vec<u
     let cipher = ChaCha20Poly1305::new(key.into());
 
     cipher
-        .decrypt(
-            nonce,
-            Payload {
-                msg: ciphertext,
-                aad,
-            },
-        )
+        .decrypt(nonce, Payload { msg: ciphertext, aad })
         .map_err(|_| {
             warn!("FATAL: AEAD decryption failed — wrong key, wrong AAD, or tampered data");
             anyhow!("Decryption failed — wrong key, wrong context, or data was tampered with")

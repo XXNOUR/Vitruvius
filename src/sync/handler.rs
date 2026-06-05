@@ -137,8 +137,7 @@ pub async fn on_command(
             {
                 let st = state.lock().await;
                 let wire_encrypted = st.encryption_key.is_some() || !st.peer_keys.is_empty();
-                let fp = st
-                    .encryption_key
+                let fp = st.encryption_key
                     .or_else(|| st.peer_keys.values().next().copied())
                     .map(|k| crate::crypto::short_fingerprint(&k))
                     .unwrap_or_else(|| "—".to_string());
@@ -301,11 +300,7 @@ pub async fn on_command(
         GuiCommand::RevokeKey { peer_id } => {
             if let Ok(pid) = peer_id.parse::<libp2p::PeerId>() {
                 match tofu::revoke_peer_key(&peer_id) {
-                    Err(e) => log(
-                        event_tx,
-                        "ERROR",
-                        format!("Failed to revoke key for {}: {e}", short_id(&peer_id)),
-                    ),
+                    Err(e) => log(event_tx, "ERROR", format!("Failed to revoke key for {}: {e}", short_id(&peer_id))),
                     Ok(_) => {
                         state.lock().await.peer_keys.remove(&pid);
                         log(
@@ -316,9 +311,7 @@ pub async fn on_command(
                                 short_id(&peer_id)
                             ),
                         );
-                        let _ = event_tx.send(GuiEvent::PeerKeyRevoked {
-                            peer_id: peer_id.clone(),
-                        });
+                        let _ = event_tx.send(GuiEvent::PeerKeyRevoked { peer_id: peer_id.clone() });
                         // Re-send TrustedPeers so the GUI list refreshes
                         let _ = event_tx.send(GuiEvent::TrustedPeers {
                             peer_ids: tofu::list_trusted_peers(),
@@ -341,11 +334,7 @@ pub async fn on_command(
                     }
                     match crate::crypto::generate_key(&p) {
                         Err(e) => {
-                            log(
-                                event_tx,
-                                "ERROR",
-                                format!("Failed to generate vault key: {e}"),
-                            );
+                            log(event_tx, "ERROR", format!("Failed to generate vault key: {e}"));
                             return;
                         }
                         Ok(_) => match crate::crypto::load_key(&p) {
@@ -356,11 +345,7 @@ pub async fn on_command(
                             Ok(key) => {
                                 let mut st = state.lock().await;
                                 st.vault_key = Some(key);
-                                log(
-                                    event_tx,
-                                    "OK",
-                                    format!("Vault key auto-generated at {}", p.display()),
-                                );
+                                log(event_tx, "OK", format!("Vault key auto-generated at {}", p.display()));
                             }
                         },
                     }
@@ -380,9 +365,7 @@ pub async fn on_command(
                     }
                 ),
             );
-            let _ = event_tx.send(GuiEvent::VaultModeChanged {
-                vault_mode: enabled,
-            });
+            let _ = event_tx.send(GuiEvent::VaultModeChanged { vault_mode: enabled });
         }
 
         GuiCommand::DecryptFile { name, dest } => {
@@ -426,11 +409,7 @@ pub async fn on_command(
             let dest_path = std::path::PathBuf::from(&dest);
             match storage::vault_export_to_plaintext(&vault_path, &key, &dest_path) {
                 Ok(n) => {
-                    log(
-                        event_tx,
-                        "OK",
-                        format!("Decrypted {name} → {dest} ({n} bytes)"),
-                    );
+                    log(event_tx, "OK", format!("Decrypted {name} → {dest} ({n} bytes)"));
                     let _ = event_tx.send(GuiEvent::DecryptComplete {
                         name: name.clone(),
                         dest: dest.clone(),
@@ -702,11 +681,9 @@ pub async fn on_swarm_event(
             });
         }
 
-        SwarmEvent::Behaviour(MyBehaviourEvent::Rr(request_response::Event::OutboundFailure {
-            peer,
-            error,
-            ..
-        })) => {
+        SwarmEvent::Behaviour(MyBehaviourEvent::Rr(
+            request_response::Event::OutboundFailure { peer, error, .. },
+        )) => {
             let pid_str = peer.to_string();
             warn!("OutboundFailure to {}: {:?}", short_id(&pid_str), error);
             log(
@@ -719,11 +696,9 @@ pub async fn on_swarm_event(
             );
         }
 
-        SwarmEvent::Behaviour(MyBehaviourEvent::Rr(request_response::Event::InboundFailure {
-            peer,
-            error,
-            ..
-        })) => {
+        SwarmEvent::Behaviour(MyBehaviourEvent::Rr(
+            request_response::Event::InboundFailure { peer, error, .. },
+        )) => {
             let pid_str = peer.to_string();
             warn!("InboundFailure from {}: {:?}", short_id(&pid_str), error);
         }
@@ -888,16 +863,18 @@ async fn on_request(
                             Err(e) => {
                                 let _ = swarm.behaviour_mut().rr.send_response(
                                     channel,
-                                    SyncMessage::Error {
-                                        message: e.to_string(),
-                                    },
+                                    SyncMessage::Error { message: e.to_string() },
                                 );
                                 return;
                             }
                         };
                         // Remember which file_ids we just told this peer about
                         // so we can resolve their EncryptedChunkRequest.
-                        state.lock().await.outbound_file_ids.insert(peer, id_map);
+                        state
+                            .lock()
+                            .await
+                            .outbound_file_ids
+                            .insert(peer, id_map);
                         let _ = swarm.behaviour_mut().rr.send_response(channel, resp);
                     } else {
                         log(
@@ -956,7 +933,10 @@ async fn on_request(
                 log(
                     event_tx,
                     "INFO",
-                    format!("→ encrypted chunk [{chunk_index}] to {}", short_id(pid_str)),
+                    format!(
+                        "→ encrypted chunk [{chunk_index}] to {}",
+                        short_id(pid_str)
+                    ),
                 );
             }
             let _ = swarm.behaviour_mut().rr.send_response(channel, resp);
@@ -1263,10 +1243,8 @@ async fn on_response(
                         // Broadcast updated VaultStatus so GUI security pill refreshes.
                         {
                             let st = state.lock().await;
-                            let wire_encrypted =
-                                st.encryption_key.is_some() || !st.peer_keys.is_empty();
-                            let fp = st
-                                .encryption_key
+                            let wire_encrypted = st.encryption_key.is_some() || !st.peer_keys.is_empty();
+                            let fp = st.encryption_key
                                 .or_else(|| st.peer_keys.values().next().copied())
                                 .map(|k| crate::crypto::short_fingerprint(&k))
                                 .unwrap_or_else(|| "—".to_string());
@@ -1282,10 +1260,10 @@ async fn on_response(
                         // off automatically without the user clicking anything.
                         let has_folder = state.lock().await.sync_path.is_some();
                         if has_folder {
-                            swarm
-                                .behaviour_mut()
-                                .rr
-                                .send_request(&peer, SyncMessage::ManifestRequest);
+                            swarm.behaviour_mut().rr.send_request(
+                                &peer,
+                                SyncMessage::ManifestRequest,
+                            );
                             log(
                                 event_tx,
                                 "INFO",
@@ -1385,7 +1363,11 @@ async fn on_response(
                     },
                 );
             }
-            state.lock().await.inbound_file_ids.insert(peer, info_map);
+            state
+                .lock()
+                .await
+                .inbound_file_ids
+                .insert(peer, info_map);
 
             let dl = transfers.entry(peer).or_insert_with(PeerDownload::new);
             let mut newly_queued = 0usize;
@@ -1668,15 +1650,12 @@ async fn on_response(
                         let sp = sync_path.clone();
                         tokio::spawn(async move {
                             if let Ok(files) = storage::list_folder_all(&sp).await {
-                                let listing: Vec<GuiFileInfo> = files
-                                    .iter()
-                                    .map(|f| GuiFileInfo {
-                                        name: f.file_name.clone(),
-                                        size: f.file_size,
-                                        chunks: f.total_chunks,
-                                        is_vault: f.is_vault,
-                                    })
-                                    .collect();
+                                let listing: Vec<GuiFileInfo> = files.iter().map(|f| GuiFileInfo {
+                                    name: f.file_name.clone(),
+                                    size: f.file_size,
+                                    chunks: f.total_chunks,
+                                    is_vault: f.is_vault,
+                                }).collect();
                                 let _ = etx.send(GuiEvent::FolderListing { files: listing });
                             }
                         });
@@ -1792,10 +1771,7 @@ async fn on_response(
                     );
                     swarm.behaviour_mut().rr.send_request(
                         &peer,
-                        SyncMessage::EncryptedChunkRequest {
-                            file_id,
-                            chunk_index,
-                        },
+                        SyncMessage::EncryptedChunkRequest { file_id, chunk_index },
                     );
                     return;
                 }
@@ -1837,10 +1813,7 @@ async fn on_response(
                 );
                 swarm.behaviour_mut().rr.send_request(
                     &peer,
-                    SyncMessage::EncryptedChunkRequest {
-                        file_id,
-                        chunk_index,
-                    },
+                    SyncMessage::EncryptedChunkRequest { file_id, chunk_index },
                 );
                 return;
             }
@@ -1859,11 +1832,7 @@ async fn on_response(
                 ts.next_request += 1;
             }
 
-            log(
-                event_tx,
-                "INFO",
-                format!("{file_name}  {}/{total} (enc)", chunk_index_us + 1),
-            );
+            log(event_tx, "INFO", format!("{file_name}  {}/{total} (enc)", chunk_index_us + 1));
 
             if ts.received_chunks.len() < total {
                 return;
@@ -1896,15 +1865,12 @@ async fn on_response(
                         let sp = sync_path.clone();
                         tokio::spawn(async move {
                             if let Ok(files) = storage::list_folder_all(&sp).await {
-                                let listing: Vec<GuiFileInfo> = files
-                                    .iter()
-                                    .map(|f| GuiFileInfo {
-                                        name: f.file_name.clone(),
-                                        size: f.file_size,
-                                        chunks: f.total_chunks,
-                                        is_vault: f.is_vault,
-                                    })
-                                    .collect();
+                                let listing: Vec<GuiFileInfo> = files.iter().map(|f| GuiFileInfo {
+                                    name: f.file_name.clone(),
+                                    size: f.file_size,
+                                    chunks: f.total_chunks,
+                                    is_vault: f.is_vault,
+                                }).collect();
                                 let _ = etx.send(GuiEvent::FolderListing { files: listing });
                             }
                         });
